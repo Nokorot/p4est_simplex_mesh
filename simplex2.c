@@ -1,11 +1,10 @@
 
 // #include <p4est_to_p8est.h>
 
-#include "p8est.h"
-#include "p8est_connectivity.h"
 #include "sc.h"
 #include "sc_containers.h"
 #include <sc_containers.h>
+#include <sc_search.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -22,8 +21,9 @@
 #include <p4est_bits.h>
 #include <p4est_ghost.h>
 #include "p4est_vtk.h"
-
+#include "p4est_communication.h"
 #else 
+#include "p8est.h"
 #include "p8est_bits.h"
 #include "p8est_search.h"
 #include "p8est_iterate.h"
@@ -34,6 +34,7 @@
 #include <p8est_bits.h>
 #include <p8est_ghost.h>
 #include <p8est_vtk.h>
+#include "p8est_connectivity.h"
 
 #endif
 #include <sc_options.h>
@@ -44,6 +45,10 @@ p4est_vtk_context_t *
 p4est_vtk_write_header_points(
     p4est_vtk_context_t *cont, 
     sc_array_t *vertices);
+
+#define QUAD_COORDS(quad) \
+            (quad).x / (double) P4EST_ROOT_LEN, \
+            (quad).y / (double) P4EST_ROOT_LEN
 
 typedef struct 
 {
@@ -165,7 +170,7 @@ static int refine_fn (p4est_t * p4est, p4est_topidx_t which_tree, p4est_quadrant
     return 1;
   }
   if (quadrant->level == 1 && p4est_quadrant_child_id (quadrant) == 3) {
-    return 0;
+    // return 0;
     return 1;
   }
   if (quadrant->x == P4EST_LAST_OFFSET (2) &&
@@ -271,8 +276,6 @@ p4est_simplex_mesh_destroy(
 }
 
 
-
-
 typedef struct {
   context_t *g;
   p4est_nodes_t *nodes;
@@ -280,6 +283,8 @@ typedef struct {
 #ifdef P4_TO_P8
   sc_hash_array_t *hanging_edge_nodes;
 #endif
+
+  sc_array_t *hanging_ghost_face_nodes;
 
   size_t num_indep;
   size_t num_fnodes;
@@ -290,12 +295,13 @@ void p4est_record_per_quad(
     p4est_record_hanging_data_t *d,
     p4est_topidx_t t, 
     p4est_quadrant_t *quad,
-    size_t elem) 
+    size_t elem,
+    int is_ghost)
 {
   int fi, nface;
   
   p4est_topidx_t rt;
-  p4est_quadrant_t parent, ret;
+  p4est_quadrant_t parent, n;
 
   p4est_quad_face_node_t qid;
 #ifdef P4_TO_P8
@@ -304,11 +310,14 @@ void p4est_record_per_quad(
   sc_array_t *quads, *treeids, *nedges;
 #endif
 
+  // size_t hanging_ghost_face_nodes;
+  // hanging_ghost_face_nodes = 0;
+  // d->hanging_ghost_face_nodes = sc_array_new(3*sizeof(double));
+
   // if (quad->level == 0) { // This case need to be considered differently
   // TODO: Need to make sure faces are split the same from both sides
   //  Only relevant in 3D
   // }
-
 
   int c = p4est_quadrant_child_id(quad);
 
@@ -327,31 +336,116 @@ void p4est_record_per_quad(
   for (fi = 0; fi < P4EST_DIM; ++fi) {
     int face = p4est_corner_faces[c][fi];
 
-    int fc = p8est_corner_face_corners[c][face];
+    int fc = p4est_corner_face_corners[c][face];
     int opp_corner0 = p4est_face_corners[face][(P4EST_HALF - 1) ^ fc];
 
-    // TODO: Reorder depending on c?
-    p4est_locidx_t c0 = d->nodes->local_nodes[P4EST_CHILDREN * elem + opp_corner0];
+    int face_is_haning;
 
-    if ((d->num_indep <= c0 && c0 < d->num_indep + d->num_fnodes)) // Hanging face
-    {
+    p4est_locidx_t c0;
 
-      p4est_quadrant_parent(quad, &parent);
-      rt = p4est_quadrant_face_neighbor_extra(&parent, t, face, &ret, &nface,
+    p4est_quadrant_parent(quad, &parent);
+
+    if (is_ghost) {
+        // if (d->g->mpirank != 0)
+        //   continue;
+        //
+        printf("HHH\n");
+
+        rt = p4est_quadrant_face_neighbor_extra(&parent, t, face, &n, &nface,
                                               d->g->conn);
+
+        if (rt < 0) 
+          continue;
+
+        n.p.piggy3.which_tree = rt;
+
+        ssize_t lnid; // p4est_quadrant_compare_piggy
+        lnid = sc_array_bsearch (&(d->g->ghost_layer->mirrors), 
+                                 &n, 
+                                 p4est_quadrant_compare_piggy);
+
+        if (lnid < 0)
+          continue;
+
+         // ++hanging_ghost_face_nodes;
+         // c0 = -hanging_ghost_face_nodes;
+
+        // printf("Neighbor %d : (%f, %f) -> (%f, %f), face %d, nface %d\n", 
+        //     d->g->mpirank,
+        //     QUAD_COORDS(parent),
+        //     QUAD_COORDS(n), face, nface);
+
+        // printf("HH %d: %d %d\n", face, ((p4est_quadrant_t *) (d->g->ghost_layer->mirrors.array))->p.which_tree, rt);
+  
+        // printf("KKK4KK %ld\n", lnid);
+
+        face_is_haning = 1;
+
+    } 
+    else {
+      // TODO: Reorder depending on c?
+      c0 = d->nodes->local_nodes[P4EST_CHILDREN * elem + opp_corner0];
+  
+      face_is_haning = (d->num_indep <= c0 && c0 < d->num_indep + d->num_fnodes);
+
+      rt = p4est_quadrant_face_neighbor_extra(&parent, t, face, &n, &nface,
+                                              d->g->conn);
+
+      if (rt < 0) 
+        continue;
+
+      // printf("Neighbor %d : (%f, %f) -> (%f, %f), face %d, nface %d\n", 
+      //     t,
+      //     QUAD_COORDS(parent),
+      //     QUAD_COORDS(n), face, nface);
+
+
+      // printf("J %d\n", rt);
+
+    }
+
+    if (face_is_haning) // Hanging face
+    {
+      
 
 #ifndef P4_TO_P8
       p4est_quad_face_node_t *added, qid;
       qid.which_tree = rt;
-      qid.quad = ret;
+      qid.quad = n;
       qid.face = nface % P4EST_FACES;
 
       added = sc_hash_array_insert_unique(d->hanging_face_nodes, &qid, NULL);
       if (added) {
-        *added = qid;
-        added->node_index = c0;
-      }
 
+        *added = qid;
+        if (is_ghost) {
+          double *vx = sc_array_push(d->hanging_ghost_face_nodes);
+          double abc[3];
+          double frac = 1.0 / (double) P4EST_ROOT_LEN; 
+          double half_len = P4EST_QUADRANT_LEN(quad->level);
+
+          abc[0] = (double) ( quad->x 
+              + (face == 1 || (face == 2 && c == 0) || (face == 3 && c == 2) ? half_len : 0) 
+              ) / P4EST_ROOT_LEN;
+          abc[1] = (double) ( quad->y 
+              + (face == 3 || (face == 0 && c == 0) || (face == 1 && c == 1) ? half_len : 0) 
+              ) / P4EST_ROOT_LEN;
+          abc[2] = 0;
+
+
+          d->g->geom->X(d->g->geom, quad->p.which_tree, abc, vx);
+  
+          printf("ADD(%d): %d (%.3f, %.3f) %d %d : (%.3f %.3f %.3f)\n", 
+              d->g->mpirank, c, QUAD_COORDS(*quad), n.level, qid.face,
+              vx[0], vx[1], vx[2]);
+
+
+          added->node_index = -d->hanging_ghost_face_nodes->elem_count;
+        }
+        else {
+          added->node_index = c0;
+        }
+      }
 #else
 
       for (size_t ei = 0; ei < 3; ++ei) {
@@ -375,7 +469,7 @@ void p4est_record_per_quad(
         }
 
         p4est_quad_edge_node_t *added, qid;
-        qid.quad = ret;
+        qid.quad = n;
         qid.which_tree = rt;
         qid.edge = nedge;
 
@@ -434,12 +528,10 @@ void p4est_record_per_quad(
 #endif
 }
 
-
-
-
 void
 p4est_record_hanging_faces(
     context_t *g, 
+    sc_array_t *vertices,
     p4est_nodes_t *nodes, 
     sc_hash_array_t **hanging_face_nodes_out
 #ifdef P4_TO_P8
@@ -462,6 +554,7 @@ p4est_record_hanging_faces(
   
   
   d.g = g;
+  d.hanging_ghost_face_nodes = vertices;
   d.nodes = nodes;
   d.num_indep = nodes->indep_nodes.elem_count;
   d.num_fnodes = nodes->face_hangings.elem_count;
@@ -489,10 +582,97 @@ p4est_record_hanging_faces(
 
     for (zz = 0; zz < quadrants->elem_count; ++zz, ++elem) {
       quad = p4est_quadrant_array_index(quadrants, zz);
-      p4est_record_per_quad(&d, t, quad, elem);
+      p4est_record_per_quad(&d, t, quad, elem, 0);
     }
   }
+  
+  for (zz=0; zz < g->ghost_layer->ghosts.elem_count; ++zz) {
+    quad = sc_array_index(&(g->ghost_layer->ghosts), zz);
+
+    // if (g->mpirank == 0)
+    //   printf("G %d (%f %f) \n", g->mpirank, QUAD_COORDS(*quad));
+
+    p4est_record_per_quad(&d, quad->p.which_tree, quad, 0, 1);
+  }
 }
+
+ 
+// void
+// p4est_record_hanging_faces_2(
+//     context_t *g, 
+//     // p4est_nodes_t *nodes, 
+//     sc_hash_array_t **hanging_face_nodes_out
+// #ifdef P4_TO_P8
+//     , sc_hash_array_t **hanging_edge_nodes_out
+// #endif
+//     ) {
+// 
+//   p4est_record_hanging_data_t d;
+// 
+// #ifdef P4_TO_P8
+//   sc_array_t *quads, *treeids, *nedges;
+// #endif
+// 
+//   p4est_topidx_t t, rt;
+//   p4est_tree_t *tree;
+//   p4est_quadrant_t *quad, parent, ret;
+// 
+//   sc_array_t *quadrants;
+//   size_t zz;
+//   
+//   d.g = g;
+//   // d.nodes = nodes;
+//   // d.num_indep = nodes->indep_nodes.elem_count;
+//   // d.num_fnodes = nodes->face_hangings.elem_count;
+// 
+//   // d.hanging_face_nodes = sc_hash_array_new(sizeof(p4est_quad_face_node_t), 
+//   //                                       (sc_hash_function_t) p4est_quad_face_hash_fn, 
+//   //                                       (sc_equal_function_t) p4est_quad_face_equal_fn,
+//   //                                       NULL);
+//   // *hanging_face_nodes_out = d.hanging_face_nodes;
+//   
+//   sc_hash_array_t *cnodes, *fnodes, *enodes;
+// 
+// 
+//   cnodes = sc_hash_array_new (sizeof (p4est_indep_t),
+//                               (sc_hash_function_t *) p4est_node_hash_piggy_fn,
+//                               p4est_node_equal_piggy_fn, NULL);
+//   
+//   fnodes = sc_hash_array_new (sizeof (p4est_indep_t),
+//                               (sc_hash_function_t *) p4est_node_hash_piggy_fn,
+//                               p4est_node_equal_piggy_fn, NULL);
+//   
+// 
+// 
+// #ifdef P4_TO_P8
+//   d.hanging_edge_nodes = sc_hash_array_new(sizeof(p4est_quad_edge_node_t), 
+//                                         (sc_hash_function_t)  p4est_quad_edge_hash_fn, 
+//                                         (sc_equal_function_t) p4est_quad_edge_equal_fn,
+//                                         NULL);
+//   *hanging_edge_nodes_out = d.hanging_edge_nodes;
+// #endif
+//   
+//   p4est_locidx_t elem = 0;
+//   for (t=g->p4est->first_local_tree;
+//       t<=g->p4est->last_local_tree; ++t) {
+//   
+//     tree = p4est_tree_array_index(g->p4est->trees, t);
+//     quadrants = &tree->quadrants;
+// 
+//     for (zz = 0; zz < quadrants->elem_count; ++zz, ++elem) {
+//       quad = p4est_quadrant_array_index(quadrants, zz);
+//       p4est_record_per_quad(&d, t, quad, elem, 0);
+//     }
+//   }
+//   
+//   for (zz=0; zz < g->ghost_layer->ghosts.elem_size; ++zz) {
+//     quad = sc_array_index(&g->ghost_layer->ghosts, zz);
+//   
+//     p4est_record_per_quad(&d, t, quad, 0, 1);
+//   }
+// }
+
+
 
 
 p4est_simplex_mesh_t *
@@ -541,7 +721,13 @@ create_simplex_mesh(context_t *g)
   mesh = P4EST_ALLOC(p4est_simplex_mesh_t, 1);
   
 
-  p4est_record_hanging_faces(g, nodes, &hanging_face_nodes
+  mesh->vertices = sc_array_new(3*sizeof(double));
+
+  p4est_record_hanging_faces(
+      g, 
+      mesh->vertices,
+      nodes, 
+      &hanging_face_nodes
 #ifdef P4_TO_P8
       , &hanging_edge_nodes
 #endif
@@ -553,27 +739,30 @@ create_simplex_mesh(context_t *g)
     ///    enodes
     ///    elem_nodes
     ///    additional_face_nodes
+    ///    ghost_face_nodes
 
   num_elems = nodes->num_local_quadrants;
   num_cnodes = nodes->indep_nodes.elem_count;
   num_fnodes = nodes->face_hangings.elem_count;
 
-  off_cnodes = 0;
-  off_fnodes = num_cnodes;
+  printf("GG %ld\n", mesh->vertices->elem_count);
+
+  off_cnodes = mesh->vertices->elem_count;
+  off_fnodes = off_cnodes + num_cnodes;
 
 #ifdef P4_TO_P8
   num_enodes = nodes->edge_hangings.elem_count;
-  off_enodes = num_cnodes + num_fnodes;
+  off_enodes = off_fnodes + num_fnodes;
 
-  off_elem_nodes = num_cnodes + num_fnodes + num_enodes;
+  off_elem_nodes = off_enodes + num_enodes;
 
   num_verticies = num_elems + num_cnodes + num_fnodes + num_enodes; 
 #else
-  off_elem_nodes = num_cnodes + num_fnodes;
+  off_elem_nodes = off_fnodes + num_fnodes;
   num_verticies = num_elems + num_cnodes + num_fnodes; 
 #endif
 
-  mesh->vertices = sc_array_new_count(3*sizeof(double), num_verticies);
+  sc_array_push_count(mesh->vertices, num_verticies);
   mesh->simplicies = sc_array_new((P4EST_DIM + 1) *sizeof(p4est_locidx_t));
 
   // Add all the vertices coming from independent nodes (indep_nodes)
@@ -678,12 +867,12 @@ create_simplex_mesh(context_t *g)
         if (sc_hash_array_lookup(hanging_edge_nodes, &qedge_id, &position)) {
           p4est_quad_edge_node_t *found;
           found = sc_array_index(&hanging_edge_nodes->a, position);
-          edge_noes[jj] = found->node_index;
+          edge_noes[jj] = off_cnodes + found->node_index;
 
         } 
         else 
         {
-          edge_noes[jj] = 0;
+          edge_noes[jj] = -1;
         }
       }
 
@@ -695,13 +884,13 @@ create_simplex_mesh(context_t *g)
         p4est_locidx_t *simplex;
 
 #ifndef P4_TO_P8
-        p4est_locidx_t c0 = nodes->local_nodes[P4EST_CHILDREN*elem + p4est_face_corners[fi][0]];
-        p4est_locidx_t c1 = nodes->local_nodes[P4EST_CHILDREN*elem + p4est_face_corners[fi][1]];
+        p4est_locidx_t c0 = off_cnodes +
+          nodes->local_nodes[P4EST_CHILDREN*elem + p4est_face_corners[fi][0]];
+        p4est_locidx_t c1 = off_cnodes +
+          nodes->local_nodes[P4EST_CHILDREN*elem + p4est_face_corners[fi][1]];
 
-        // printf("K %d (%f %f), %d\n", qid.which_tree, 
-        //     qid.quad.x / (double) P4EST_ROOT_LEN, qid.quad.y /  (double) P4EST_ROOT_LEN, 
-        //     qid.face);
-
+        // p4est_quadrant_t ret;
+        int nface;
 
         // Check if the face is hanging
         if (sc_hash_array_lookup(hanging_face_nodes, &qid, &position))  
@@ -709,17 +898,29 @@ create_simplex_mesh(context_t *g)
           p4est_quad_face_node_t *found;
           found = sc_array_index(&hanging_face_nodes->a, position);
 
-          simplex = sc_array_push(mesh->simplicies);
-          simplex[0] = cc;
-          simplex[1] = c0;
-          simplex[2] = found->node_index;
-          // printf("S1 %d %d %d \n", cc, c0, c1);
-          
-          simplex = sc_array_push(mesh->simplicies);
-          simplex[0] = cc;
-          simplex[1] = found->node_index;
-          simplex[2] = c1;
-          // printf("S2 %d %d %d \n", cc, c0, c1);
+          p4est_locidx_t cf;
+
+          if (found->node_index < 0) {
+            cf = ~found->node_index; // Bitwise not
+            printf("HH\n");
+          }
+          else 
+            cf = off_cnodes + found->node_index;
+
+
+          // if (found->node_index >= 0) {
+            simplex = sc_array_push(mesh->simplicies);
+            simplex[0] = cc;
+            simplex[1] = c0;
+            simplex[2] = cf;
+            // printf("S1 %d %d %d \n", cc, c0, c1);
+            
+            simplex = sc_array_push(mesh->simplicies);
+            simplex[0] = cc;
+            simplex[1] = cf;
+            simplex[2] = c1;
+            printf("S2 %d %d %d \n", cc, c0, c1);
+          // }
         }
         else 
         {  // Split as usual
@@ -737,7 +938,7 @@ create_simplex_mesh(context_t *g)
         int face_has_hanging_edge = 0;
         for (int jj=0; jj<4; ++jj) {
           int edge = p8est_face_edges[fi][jj];
-          if (edge_noes[edge])  
+          if (0 <= edge_noes[edge])
           {
             face_has_hanging_edge = 1;
             break;
@@ -786,8 +987,10 @@ create_simplex_mesh(context_t *g)
             int edge = p8est_face_edges[fi][jj];
           
             // Check these indices
-            p4est_locidx_t c0 = nodes->local_nodes[P4EST_CHILDREN*elem + p8est_edge_corners[edge][0]];
-            p4est_locidx_t c1 = nodes->local_nodes[P4EST_CHILDREN*elem + p8est_edge_corners[edge][1]];
+            p4est_locidx_t c0 = off_cnodes +
+              nodes->local_nodes[P4EST_CHILDREN*elem + p8est_edge_corners[edge][0]];
+            p4est_locidx_t c1 = off_cnodes +
+              nodes->local_nodes[P4EST_CHILDREN*elem + p8est_edge_corners[edge][1]];
 
 
             if (!edge_noes[edge])  
@@ -822,10 +1025,14 @@ create_simplex_mesh(context_t *g)
         }
         else
         {
-          p4est_locidx_t c0 = nodes->local_nodes[P4EST_CHILDREN*elem + p4est_face_corners[fi][0]];
-          p4est_locidx_t c1 = nodes->local_nodes[P4EST_CHILDREN*elem + p4est_face_corners[fi][1]];
-          p4est_locidx_t c2 = nodes->local_nodes[P4EST_CHILDREN*elem + p4est_face_corners[fi][2]];
-          p4est_locidx_t c3 = nodes->local_nodes[P4EST_CHILDREN*elem + p4est_face_corners[fi][3]];
+          p4est_locidx_t c0 = off_cnodes +
+            nodes->local_nodes[P4EST_CHILDREN*elem + p4est_face_corners[fi][0]];
+          p4est_locidx_t c1 = off_cnodes +
+            nodes->local_nodes[P4EST_CHILDREN*elem + p4est_face_corners[fi][1]];
+          p4est_locidx_t c2 = off_cnodes +
+            nodes->local_nodes[P4EST_CHILDREN*elem + p4est_face_corners[fi][2]];
+          p4est_locidx_t c3 = off_cnodes +
+            nodes->local_nodes[P4EST_CHILDREN*elem + p4est_face_corners[fi][3]];
 
           /// TODO: HERE the needs to be some logic to ensure that each face 
           /// is split in along the same diagonal on both sides.
