@@ -1,4 +1,5 @@
-
+#ifndef SIMPLEX2_H_
+#define SIMPLEX2_H_
 
 #ifndef P4_TO_P8
 #include <p4est_bits.h>
@@ -69,22 +70,8 @@ p4est_quad_face_equal_fn(
     const void *used_data);
 
 
-#ifdef P4_TO_P8
-typedef struct {
-    p8est_quadrant_t quad;
-    p4est_locidx_t which_tree;
-    int8_t edge;
-
-    p4est_locidx_t node_index;
-}
-p4est_quad_edge_node_t;
-
-unsigned int
-p4est_quad_edge_hash_fn(const p4est_quad_edge_node_t *v, const void *user_data);
-#endif
-
-
-
 p4est_simplex_mesh_t *
 create_simplex_mesh(context_t *g);
 
+
+#endif
