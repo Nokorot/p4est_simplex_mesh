@@ -1,9 +1,9 @@
 .gdb_history
-.vscode
-compile_flags.txt
-out
 out2d 
 out3d
 simplex2
 simplex3
-scratch.c
+simplex2.o
+simplex3.o
+.deps/
+.dirstamp
