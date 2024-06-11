@@ -1,4 +1,6 @@
-// #include <p4est_to_p8est.h>  // This is only for my vim-language-server
+#ifdef VIM_LS
+#include <p4est_to_p8est.h>
+#endif
 
 #include <sc_options.h>
 
@@ -6,13 +8,16 @@
 #include <p4est_bits.h>
 #include <p4est_extended.h>
 #include <p4est_vtk.h>
-#include <p4est_simplex_mesh.h>
+
+#include "p4est_simplex_mesh.h"
 #else
 #include <p8est_bits.h>
 #include <p8est_extended.h>
 #include <p8est_vtk.h>
-#include <p8est_simplex_mesh.h>
+
+#include "p8est_simplex_mesh.h"
 #endif
+
 
 static char *p4est_connectivity_names[] = {
 #ifndef P4_TO_P8
@@ -271,8 +276,7 @@ main(int argc, char **argv) {
     smesh = p4est_new_simplex_mesh(
         g->p4est,
         g->geom,
-        g->ghost_layer, 
-        opts->hangine_node_level);
+        g->ghost_layer);
 
 #ifndef P4_TO_P8
     sprintf(filepath, "out2d/box_%s_%d-%d", opts->conn, opts->minlevel, opts->maxlevel);
