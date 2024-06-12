@@ -18,6 +18,7 @@
 #include "p8est_simplex_mesh.h"
 #endif
 
+#include "utils.c"
 
 static char *p4est_connectivity_names[] = {
 #ifndef P4_TO_P8
@@ -56,19 +57,6 @@ typedef struct
   char *errmsg;
 }
 context_t;
-
-
-#ifdef P4_TO_P8
-#define QUAD_COORDS(quad) \
-            (quad).x / (double) P4EST_ROOT_LEN, \
-            (quad).y / (double) P4EST_ROOT_LEN, \
-            (quad).z / (double) P4EST_ROOT_LEN
-
-#else
-#define QUAD_COORDS(quad) \
-            (quad).x / (double) P4EST_ROOT_LEN, \
-            (quad).y / (double) P4EST_ROOT_LEN
-#endif
 
 /** Refines the p4est, producing hanging-nodes
  */
@@ -277,6 +265,9 @@ main(int argc, char **argv) {
         g->p4est,
         g->geom,
         g->ghost_layer);
+
+    if (!smesh)
+      break;
 
 #ifndef P4_TO_P8
     sprintf(filepath, "out2d/box_%s_%d-%d", opts->conn, opts->minlevel, opts->maxlevel);
