@@ -30,9 +30,19 @@ void
 p4est_simplex_mesh_destroy(
     p4est_simplex_mesh_t *smesh);
 
+void 
+p4est_quad_corner_coords(
+    p4est_quadrant_t *quad,
+    int face,
+    double abc[3]);
 
 void 
-p4est_face_center_coords(
+p4est_quad_center_coords(
+    p4est_quadrant_t *quad,
+    double abc[3]);
+
+void 
+p4est_quad_face_center_coords(
     p4est_quadrant_t *quad,
     int face,
     double abc[3]);

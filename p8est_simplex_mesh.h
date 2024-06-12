@@ -8,6 +8,11 @@
 #define p4est_simplex_mesh_destroy      p8est_simplex_mesh_destroy
 #define p4est_new_simplex_mesh          p8est_new_simplex_mesh
 
+#define p4est_quad_center_coords        p8est_quad_center_coords
+#define p4est_quad_corner_coords        p8est_quad_corner_coords
+#define p4est_quad_face_center_coords   p8est_quad_face_center_coords
+
+
 #define p4est_simplex_mesh_write_gmsh_file \
         p8est_simplex_mesh_write_gmsh_file
 #define p4est_simplex_mesh_write_vtk_file \
