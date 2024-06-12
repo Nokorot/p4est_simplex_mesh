@@ -49,7 +49,7 @@ p4est_quad_face_center_coords(
 
 #ifdef P4_TO_P8
 void
-p8est_edge_center_coords(
+p8est_quad_edge_center_coords(
     p4est_quadrant_t *quad,
     int edge,
     double abc[3]);

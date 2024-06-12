@@ -177,9 +177,6 @@ p4est_find_or_insert_new_element_node(
 
   elem_node = sc_hash_array_insert_unique(element_hash, &quad, &position);
   if (elem_node) {
-    printf("Qid %u %u  ", quadid, treeid);
-    PRTN_QUAD(quad);
-
     memset(elem_node, 0, sizeof(element_nodes_t));
     elem_node->element = quad;
     elem_node->quadid = quadid;
@@ -242,37 +239,46 @@ iter_face(p4est_iter_face_info_t *info, void *user_data) {
   if (!side_hanging)
     return;
 
-  // Add the face centre node
-  p4est_locidx_t cf = d->vertices->elem_count;
+  p4est_locidx_t cf;
 
-  printf("Fnode %d, t %d, qid %d: f %d ",
-      cf,
-      side_full->treeid,
-      side_full->is.full.quadid,
-      side_full->face);
-  PRTN_QUAD(*side_full->is.full.quad);
-
-  double abc[3];
-  double *vx = sc_array_push(d->vertices);
-
-  p4est_quad_face_center_coords(side_full->is.full.quad, side_full->face, abc);
-  d->geom->X(d->geom, side_full->treeid, abc, vx);
-
-  printf("   %.5f %.5f %.5f\n", vx[0], vx[1], vx[2]);
-
-  size_t position;
- 
   if (!side_full->is.full.is_ghost) {
     elem_node = p4est_find_or_insert_new_element_node(d->element_hash, 
         *side_full->is.full.quad, side_full->is.full.quadid, side_full->treeid);
+  
+    cf = elem_node->face_nodes[side_full->face];
+  } else {
+    cf = 0;
+  }
 
+  // cf != 0; Might happen if the node was added by a hanging edge
+  if (!cf) { 
+    // Add the face centre node
+    cf = d->vertices->elem_count;
+
+    printf("Fnode %d, t %d, qid %d: f %d ",
+        cf,
+        side_full->treeid,
+        side_full->is.full.quadid,
+        side_full->face);
+    PRTN_QUAD(*side_full->is.full.quad);
+
+    double abc[3];
+    double *vx = sc_array_push(d->vertices);
+
+    p4est_quad_face_center_coords(side_full->is.full.quad, side_full->face, abc);
+    d->geom->X(d->geom, side_full->treeid, abc, vx);
+
+    printf("   %.5f %.5f %.5f\n", vx[0], vx[1], vx[2]);
+  }
+ 
+  if (!side_full->is.full.is_ghost) {
     elem_node->face_nodes[side_full->face] = cf;
   }
 
   p4est_quadrant_t *quad;
   int face = side_hanging->face;
 
-  for (size_t sz = 0; sz < 2; ++sz) {
+  for (size_t sz = 0; sz < P4EST_HALF; ++sz) {
     if (side_hanging->is.hanging.is_ghost[sz])
       continue;
 
@@ -290,6 +296,7 @@ iter_face(p4est_iter_face_info_t *info, void *user_data) {
     int c = p4est_face_corners[face][cfc ^ 3];
 #endif
 
+    // printf(" qid %d, f %d, c = %d \n", quadid, face, c);
     elem_node->corner_nodes[c] = cf;
   }
 }
@@ -300,11 +307,17 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data) {
   p4est_simplex_mesh_data_t *d;
 
   p8est_iter_edge_side_t *side, *side_hanging, *side_full;
-  p4est_quadrant_t *elem;
   element_nodes_t *elem_node;
+
+  p4est_topidx_t treeid;
+  p4est_locidx_t quadid;
+  p4est_quadrant_t *quad;
+  
+  double abc[3], *vx;
 
   p4est_locidx_t ce;
   size_t zz, position;
+
 
   d = user_data;
 
@@ -334,28 +347,27 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data) {
 
   // Add the edge node
   ce = d->vertices->elem_count;
+  quad = side_full->is.full.quad;
 
   printf("Enode %d, t %d, qid %d, e %d ",
       ce,
       side_full->treeid,
       side_full->is.full.quadid,
       side_full->edge);
-  PRTN_QUAD(*side_full->is.full.quad);
+  PRTN_QUAD(*quad);
 
-  double abc[3], *vx;
   vx = sc_array_push(d->vertices);
 
-  p8est_edge_center_coords(side_full->is.full.quad, side_full->edge, abc);
+  p8est_quad_edge_center_coords(quad, side_full->edge, abc);
   d->geom->X(d->geom, side_full->treeid, abc, vx);
 
   printf("   %.5f %.5f %.5f\n", vx[0], vx[1], vx[2]);
 
-  p4est_locidx_t quadid;
-  p4est_quadrant_t *quad;
-  
   // We record the index in the element_nodes for each side
   for (size_t zz=0; zz < info->sides.elem_count; ++zz) {
     side = sc_array_index(&info->sides, zz);
+
+    int edge = side->edge;
 
     if (!side->is_hanging) {
       if (side->is.full.is_ghost)
@@ -363,21 +375,51 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data) {
 
       quad = side->is.full.quad;
       quadid = side->is.full.quadid;
+      treeid = side->treeid;
 
       elem_node = p4est_find_or_insert_new_element_node(
           d->element_hash, *quad, quadid, side->treeid);
       
       elem_node->edge_nodes[side->edge] = ce;
+  
+      for (size_t efz = 0; efz < 2; ++efz) {
+        int face = p8est_edge_faces[edge][efz];
+      
+        int cf;
+        if (!elem_node->face_nodes[face]) {
+          // Add face node
+          cf = d->vertices->elem_count;
+
+          printf("AFnode %d, t %d, qid %d, f %d, e %d",
+              cf,
+              treeid,
+              quadid,
+              face, 
+              edge);
+          PRTN_QUAD(*side_full->is.full.quad);
+
+          vx = sc_array_push(d->vertices);
+
+          p4est_quad_face_center_coords(quad, face, abc);
+          d->geom->X(d->geom, treeid, abc, vx);
+
+          printf("   %.5f %.5f %.5f\n", vx[0], vx[1], vx[2]);
+
+          elem_node->face_nodes[face] = cf;
+        }
+
+      }
+
+
     }
     else {
-      int edge = side->edge;
 
       for(size_t sz = 0; sz < 2; ++sz) {
         if (side->is.hanging.is_ghost[sz])
           continue;
     
-        quad = side_hanging->is.hanging.quad[sz];
-        quadid = side_hanging->is.hanging.quadid[sz];
+        quad = side->is.hanging.quad[sz];
+        quadid = side->is.hanging.quadid[sz];
   
         elem_node = p4est_find_or_insert_new_element_node(
             d->element_hash, *quad, quadid, side->treeid);
@@ -386,12 +428,13 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data) {
         int cfc = p8est_corner_edge_corners[cid][edge];
         int c = p8est_edge_corners[edge][cfc ^ 1];
   
+        printf(" qid %d, f %d, c = %d \n", quadid, edge, c);
         elem_node->corner_nodes[c] = ce;
       }
     }
   }
 
-
+  
 
   // TODO: !!! ADD Face nodes for adjacent faces
 
@@ -584,6 +627,9 @@ p4est_new_simplex_mesh(
 
       qid = *quad;
       qid.p.which_tree = t;
+
+      if (quad->level > 1)
+        continue;
     
       found = sc_hash_array_lookup(d.element_hash, &qid, &position);
 
@@ -625,13 +671,14 @@ p4est_new_simplex_mesh(
 
             ce = elem_node->edge_nodes[edge];
 
-            if (ce < 0)
+            if (!ce)
             {
               simplex = sc_array_push(d.simplicies);
               simplex[0] = cc;
               simplex[1] = cf;
               simplex[2] = c0;
               simplex[3] = c1;
+              printf("A SX  %d %d %d\n", simplex[0], simplex[1], simplex[2]);
             }
             else
             {
@@ -641,12 +688,14 @@ p4est_new_simplex_mesh(
               simplex[1] = cf;
               simplex[2] = c0;
               simplex[3] = ce;
+              printf("B SX  %d %d %d\n", simplex[0], simplex[1], simplex[2]);
 
               simplex = sc_array_push(d.simplicies);
               simplex[0] = cc;
               simplex[1] = cf;
               simplex[2] = ce;
               simplex[3] = c1;
+              printf("C SX  %d %d %d\n", simplex[0], simplex[1], simplex[2]);
             }
           }
 #endif
@@ -758,11 +807,17 @@ p4est_new_simplex_mesh(
           simplex[2] = c1;
           simplex[3] = c3;
 
+          // if (!simplex[0] || !simplex[1] || !simplex[2] || !simplex[3])
+          //   printf("G SX  %d %d %d %d\n", simplex[0], simplex[1], simplex[2], simplex[3]);
+
           simplex = sc_array_push(d.simplicies);
           simplex[0] = cc;
           simplex[1] = c3;
           simplex[2] = c2;
           simplex[3] = c0;
+
+          // if (!simplex[0] || !simplex[1] || !simplex[2] || !simplex[3])
+          //   printf("H SX  %d %d %d %d\n", simplex[0], simplex[1], simplex[2], simplex[3]);
 
 #endif
         } // if fc == 0
@@ -869,7 +924,7 @@ p4est_quad_face_center_coords(
 
 #ifdef P4_TO_P8
 void
-p8est_edge_center_coords(
+p8est_quad_edge_center_coords(
     p4est_quadrant_t *quad,
     int edge,
     double abc[3])
