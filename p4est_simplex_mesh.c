@@ -9,7 +9,7 @@
 #include "utils.c"
 
 #ifdef VIM_LS
-#include <p4est_to_p8est.h>
+// #include <p4est_to_p8est.h>
 #endif
 
 #ifndef P4_TO_P8
@@ -19,7 +19,6 @@
 #else
 #include <p8est_iterate.h>
 #include "p8est_simplex_mesh.h"
-#include "p8est_connectivity.h"
 #include "p8est_simplex_mesh.h"
 #endif
 
@@ -96,7 +95,8 @@ p4est_simplex_push_node(
 
 // ITERATORS
 void
-iter_volume(p4est_iter_volume_info_t *info, void *user_data) {
+iter_volume(p4est_iter_volume_info_t *info, void *user_data)
+{
   p4est_simplex_nodes_data_t *d;
   element_nodes_t *elem_node;
 
@@ -114,7 +114,8 @@ iter_volume(p4est_iter_volume_info_t *info, void *user_data) {
 }
 
 void
-iter_face(p4est_iter_face_info_t *info, void *user_data) {
+iter_face(p4est_iter_face_info_t *info, void *user_data)
+{
   p4est_simplex_nodes_data_t *d;
 
   p4est_iter_face_side_t *side, *side_full, *side_hanging;
@@ -189,7 +190,8 @@ iter_face(p4est_iter_face_info_t *info, void *user_data) {
 
 #ifdef P4_TO_P8
 void
-iter_edge(p8est_iter_edge_info_t *info, void *user_data) {
+iter_edge(p8est_iter_edge_info_t *info, void *user_data)
+{
   p4est_simplex_nodes_data_t *d;
 
   p8est_iter_edge_side_t *side, *side_hanging, *side_full;
@@ -280,30 +282,36 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data) {
 #endif
 
 void
-iter_corner(p4est_iter_corner_info_t *info, void *user_data) {
+iter_corner(p4est_iter_corner_info_t *info, void *user_data)
+{
+
   p4est_simplex_nodes_data_t *d;
 
   p4est_iter_corner_side_t *side;
 
   element_nodes_t *elem_node;
+  p4est_locidx_t cc;
   size_t zz;
 
   d = user_data;
 
-  zz = 0;
-  side = sc_array_index(&info->sides, zz);
-
-  // Add the quad corner node
-  double abc[3];
-  p4est_quad_corner_coords(side->quad, side->corner, abc);
-
-  p4est_locidx_t cc = p4est_simplex_push_node(d, side->treeid, abc, -1);
-
+  cc = -1;
   // Record this corner_node for each of the adjacent elements
   for (zz = 0; zz < info->sides.elem_count; ++zz) {
     side = sc_array_index(&info->sides, zz);
 
+    if (side->is_ghost)
+      continue;
+
+    if (cc < 0) {
+      // Add the quad corner node
+      double abc[3];
+      p4est_quad_corner_coords(side->quad, side->corner, abc);
+      cc = p4est_simplex_push_node(d, side->treeid, abc, -1);
+    }
+
     p4est_locidx_t quadid = side->quadid;
+
     elem_node = p4est_element_node_get(d, side->treeid, quadid);
     elem_node->corner_nodes[side->corner] = cc;
   }
@@ -345,7 +353,6 @@ p4est_new_simplex_mesh_nodes(
   // Initialize all nodes with -1
   // memset(d->element_nodes->array, 0xff, num_quads*sizeof(element_nodes_t));
   memset(d->element_nodes->array, 0, num_quads*sizeof(element_nodes_t));
-
 
   p4est_iterate(p4est, ghost, d,
       iter_volume, iter_face,
