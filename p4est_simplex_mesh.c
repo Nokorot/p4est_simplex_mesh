@@ -1,5 +1,5 @@
-#include "p4est_base.h"
-#include "sc.h"
+
+#include <sc.h>
 #include <sc_containers.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -16,10 +16,12 @@
 #include "p4est_ghost.h"
 #include <p4est_iterate.h>
 #include "p4est_simplex_mesh.h"
+#include "p4est_communication.h"
 #else
 #include <p8est_iterate.h>
 #include "p8est_simplex_mesh.h"
 #include "p8est_simplex_mesh.h"
+#include "p8est_communication.h"
 #endif
 
 
@@ -47,6 +49,8 @@ typedef struct
   p4est_geometry_t *geom;
 
   sc_array_t *tree_offsets;
+
+  sc_array_t *owned_count;
 
   sc_array_t *owners;
   sc_array_t *element_nodes;
@@ -81,6 +85,7 @@ p4est_simplex_push_node(
   p4est_locidx_t node_id;
   double *vx;
   int *o;
+  size_t *ocount;
 
   node_id = d->vertices->elem_count;
 
@@ -90,7 +95,30 @@ p4est_simplex_push_node(
   o = sc_array_push(d->owners);
   *o = owner;
 
+  ocount = sc_array_index(d->owned_count, owner);
+  (*ocount)++;
+
   return node_id;
+}
+
+int
+p4est_find_ghost_owner(
+    p4est_t *p4est,
+    p4est_ghost_t *ghost,
+    p4est_locidx_t ghostid)
+{
+  p4est_quadrant_t *ghost_quad;
+  p4est_topidx_t treeid;
+
+
+  ghost_quad = sc_array_index(&ghost->ghosts, ghostid);
+  treeid = ghost_quad->p.piggy3.which_tree;
+
+  return p4est_comm_find_owner(
+            p4est,
+            treeid,
+            ghost_quad,
+            p4est->mpirank);
 }
 
 // ITERATORS
@@ -101,6 +129,7 @@ iter_volume(p4est_iter_volume_info_t *info, void *user_data)
   element_nodes_t *elem_node;
 
   double abc[3];
+  int owner;
   p4est_locidx_t cc;
 
   d = user_data;
@@ -109,7 +138,9 @@ iter_volume(p4est_iter_volume_info_t *info, void *user_data)
   // Add the quad centre node
   p4est_quad_center_coords(info->quad, abc);
 
-  cc = p4est_simplex_push_node(d, info->treeid, abc, -1);
+  owner = d->mpirank;
+
+  cc = p4est_simplex_push_node(d, info->treeid, abc, owner);
   elem_node->volume_node = cc;
 }
 
@@ -123,6 +154,7 @@ iter_face(p4est_iter_face_info_t *info, void *user_data)
   element_nodes_t *elem_node;
 
   double abc[3];
+  int owner;
 
   p4est_locidx_t cf;
   size_t sz, zz;
@@ -158,7 +190,15 @@ iter_face(p4est_iter_face_info_t *info, void *user_data)
     p4est_quad_face_center_coords(side_full->is.full.quad,
         side_full->face, abc);
 
-    cf = p4est_simplex_push_node(d, side_full->treeid, abc, d->mpirank);
+    // The full_side is always the owner
+    if (side_full->is.full.is_ghost) {
+      int ghostid = side_full->is.full.quadid;
+      owner = p4est_find_ghost_owner(d->p4est, d->ghost, ghostid);
+    } else {
+      owner = d->mpirank;
+    }
+
+    cf = p4est_simplex_push_node(d, side_full->treeid, abc, owner);
   }
 
   if (!side_full->is.full.is_ghost) {
@@ -202,6 +242,7 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
   p4est_quadrant_t *quad;
 
   double abc[3];
+  int owner;
 
   p4est_locidx_t ce, cf;
   size_t sz, zz, efz;
@@ -216,12 +257,19 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
     side = sc_array_index(&info->sides, zz);
     if (side->is_hanging)
       side_hanging = side;
-    else
+    else {
       side_full = side;
 
+      // Only a full side may be the owner
+      owner = !(side->is.full.is_ghost)
+                  ? d->mpirank
+                  : p4est_find_ghost_owner(
+                      d->p4est, d->ghost, side->is.full.quadid);
+    }
+
     // If only need to find one full and one hanging side
-    if (side_hanging && side_full)
-      break;
+    // if (side_hanging && side_full)
+    //   break;
   }
 
   // If no side is hanging we will not add an edge node
@@ -229,10 +277,13 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
     return;
   }
 
+  SC_CHECK_ABORT(side_full, "Got edge with only hanging sides");
+
   // Add the edge node
   quad = side_full->is.full.quad;
   p8est_quad_edge_center_coords(quad, side_full->edge, abc);
-  ce = p4est_simplex_push_node(d, side_full->treeid, abc, -1);
+  ce = p4est_simplex_push_node(d, side_full->treeid, abc, owner);
+
 
   // We record the index in the element_nodes for each side
   for (zz = 0; zz < info->sides.elem_count; ++zz) {
@@ -256,7 +307,9 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
         if (!elem_node->face_nodes[face]) {
           // Add face node
           p4est_quad_face_center_coords(quad, face, abc);
-          cf = p4est_simplex_push_node(d, treeid, abc, -1);
+
+          // NOTE:
+          cf = p4est_simplex_push_node(d, treeid, abc, owner);
           elem_node->face_nodes[face] = cf;
         }
       }
@@ -292,8 +345,22 @@ iter_corner(p4est_iter_corner_info_t *info, void *user_data)
   element_nodes_t *elem_node;
   p4est_locidx_t cc;
   size_t zz;
+  int owner, ghost_owner;
 
   d = user_data;
+
+  owner = d->mpirank;
+  for (zz = 0; zz < info->sides.elem_count; ++zz) {
+    side = sc_array_index(&info->sides, zz);
+
+    if (!side->is_ghost)
+      continue;
+
+    ghost_owner = p4est_find_ghost_owner(d->p4est, d->ghost, side->quadid);
+
+    if (ghost_owner < owner)
+      owner = ghost_owner;
+  }
 
   cc = -1;
   // Record this corner_node for each of the adjacent elements
@@ -307,7 +374,7 @@ iter_corner(p4est_iter_corner_info_t *info, void *user_data)
       // Add the quad corner node
       double abc[3];
       p4est_quad_corner_coords(side->quad, side->corner, abc);
-      cc = p4est_simplex_push_node(d, side->treeid, abc, -1);
+      cc = p4est_simplex_push_node(d, side->treeid, abc, owner);
     }
 
     p4est_locidx_t quadid = side->quadid;
@@ -343,8 +410,14 @@ p4est_new_simplex_mesh_nodes(
     t_off += tree->quadrants.elem_count;
   }
 
-  d->vertices = sc_array_new(3*sizeof(double));
-  d->owners    = sc_array_new(sizeof(int));
+  d->vertices     = sc_array_new(3*sizeof(double));
+  d->owners       = sc_array_new(sizeof(int));
+  d->owned_count  = sc_array_new_count(sizeof(size_t), p4est->mpisize);
+
+  for (size_t zz=0; zz < p4est->mpisize; ++zz) {
+    size_t *owned = sc_array_index(d->owned_count, zz);
+    *owned = 0;
+  }
 
   p4est_locidx_t num_quads = p4est->local_num_quadrants;
   d->element_nodes = sc_array_new_count(sizeof(element_nodes_t),
@@ -360,6 +433,22 @@ p4est_new_simplex_mesh_nodes(
       iter_edge,
 #endif
      iter_corner);
+
+  // TODO: Reorder nodes;
+
+  printf("[%d]MPISize %d \n", p4est->mpirank, p4est->mpisize);
+
+  for (size_t zz=0; zz < p4est->mpisize; ++zz) {
+    size_t *owned = sc_array_index(d->owned_count, zz);
+    printf("[%d]Rank %lu:  %lu\n", p4est->mpirank, zz, *owned);
+  }
+
+  /* for (size_tozz=0; zz < d->owners->elem_count; ++zz) {
+    int *owner = sc_array_index(d->owners, zz);
+    printf("[%d] o[%lu]:  %d\n", p4est->mpirank, zz, *owner);
+  } */
+
+  sc_array_destroy(d->owned_count);
 }
 
 // Implementations

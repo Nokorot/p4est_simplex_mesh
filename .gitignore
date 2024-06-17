@@ -11,3 +11,5 @@ p4est_simplex_mesh.o
 compile_flags.txt
 p8est_simplex_mesh.o
 out.log
+out
+debug.gdb

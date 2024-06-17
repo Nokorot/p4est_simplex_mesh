@@ -270,9 +270,9 @@ main(int argc, char **argv) {
       break;
 
 #ifndef P4_TO_P8
-    sprintf(filepath, "out2d/box_%s_%d-%d", opts->conn, opts->minlevel, opts->maxlevel);
+    sprintf(filepath, "out/box_2d_%s_%d-%d", opts->conn, opts->minlevel, opts->maxlevel);
 #else
-    sprintf(filepath, "out3d/box_%s_%d-%d", opts->conn, opts->minlevel, opts->maxlevel);
+    sprintf(filepath, "out/box_3d_%s_%d-%d", opts->conn, opts->minlevel, opts->maxlevel);
 #endif
 
     p4est_vtk_write_file(g->p4est, g->geom, filepath);
@@ -281,9 +281,9 @@ main(int argc, char **argv) {
     // write_gmsh_file(filepath, smesh);
 
 #ifndef P4_TO_P8
-    sprintf(filepath, "out2d/sx_%s_%d-%d_%d.vtk", opts->conn, opts->minlevel, opts->maxlevel, g->mpirank);
+    sprintf(filepath, "out/sx_2d_%s_%d-%d_%d.vtk", opts->conn, opts->minlevel, opts->maxlevel, g->mpirank);
 #else
-    sprintf(filepath, "out3d/sx_%s_%d-%d_%d.vtk", opts->conn, opts->minlevel, opts->maxlevel, g->mpirank);
+    sprintf(filepath, "out/sx_3d_%s_%d-%d_%d.vtk", opts->conn, opts->minlevel, opts->maxlevel, g->mpirank);
 #endif
     p4est_simplex_mesh_write_vtk_file(filepath, smesh);
 
