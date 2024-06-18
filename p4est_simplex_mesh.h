@@ -47,6 +47,8 @@ p4est_new_simplex_mesh(
     p4est_geometry_t *geometry,
     p4est_ghost_t *ghost);
 
+
+
 void
 p4est_simplex_mesh_destroy(
     p4est_simplex_mesh_t *smesh);
@@ -75,6 +77,8 @@ p8est_quad_edge_center_coords(
     int edge,
     double abc[3]);
 #endif
+
+
 
 // Function to write the mesh to a Gmsh file
 void p4est_simplex_mesh_write_gmsh_file(

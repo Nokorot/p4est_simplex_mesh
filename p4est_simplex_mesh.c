@@ -69,6 +69,49 @@ element_node_t *
 p4est_element_node_get(
     p4est_simplex_nodes_data_t *d,
     p4est_topidx_t treeid,
+    p4est_locidx_t quadid);
+
+
+p4est_locidx_t
+p4est_simplex_push_node(
+    p4est_simplex_nodes_data_t *d,
+    p4est_topidx_t treeid,
+    double abc[3],
+    int owner);
+
+
+int
+p4est_find_ghost_owner(
+    p4est_t *p4est,
+    p4est_ghost_t *ghost,
+    p4est_locidx_t ghostid);
+
+
+void
+iter_volume(p4est_iter_volume_info_t *info, void *user_data);
+
+void
+iter_face(p4est_iter_face_info_t *info, void *user_data);
+
+#ifdef P4_TO_P8
+void
+iter_edge(p8est_iter_edge_info_t *info, void *user_data);
+#endif
+
+void
+iter_corner(p4est_iter_corner_info_t *info, void *user_data);
+
+
+void
+p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d);
+
+
+// Implementations
+
+element_node_t *
+p4est_element_node_get(
+    p4est_simplex_nodes_data_t *d,
+    p4est_topidx_t treeid,
     p4est_locidx_t quadid
     )
 {
@@ -85,8 +128,7 @@ p4est_simplex_push_node(
     p4est_simplex_nodes_data_t *d,
     p4est_topidx_t treeid,
     double abc[3],
-    int owner
-    )
+    int owner)
 {
   p4est_locidx_t node_id;
   double *vx;
@@ -190,7 +232,6 @@ iter_face(p4est_iter_face_info_t *info, void *user_data)
     cf = -1;
   }
 
-  // cf != 0; Might happen if the node was added by a hanging edge
   if (cf < 0) {
     // Add the face centre node
     p4est_quad_face_center_coords(side_full->is.full.quad,
@@ -222,13 +263,10 @@ iter_face(p4est_iter_face_info_t *info, void *user_data)
 
     elem_node = p4est_element_node_get(d, side_hanging->treeid, quadid);
 
+    // Compute the corner that is on the centre of the parent face
     int cid = p4est_quadrant_child_id(quad);
     int cfc = p4est_corner_face_corners[cid][face];
-#ifndef P4_TO_P8
-    int c = p4est_face_corners[face][cfc ^ 1];
-#else
-    int c = p4est_face_corners[face][cfc ^ 3];
-#endif
+    int c = p4est_face_corners[face][cfc ^ (P4EST_HALF - 1)]; 
 
     elem_node->corner_nodes[c] = cf;
   }
@@ -272,16 +310,11 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
                   : p4est_find_ghost_owner(
                       d->p4est, d->ghost, side->is.full.quadid);
     }
-
-    // If only need to find one full and one hanging side
-    // if (side_hanging && side_full)
-    //   break;
   }
 
   // If no side is hanging we will not add an edge node
-  if (!side_hanging) {
+  if (!side_hanging)
     return;
-  }
 
   SC_CHECK_ABORT(side_full, "Got edge with only hanging sides");
 
@@ -317,9 +350,8 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
           elem_node->face_nodes[face] = cf;
         }
       }
-    }
-    else {
-      for(sz = 0; sz < 2; ++sz) {
+    } else {
+      for (sz = 0; sz < 2; ++sz) {
         if (side->is.hanging.is_ghost[sz])
           continue;
 
@@ -359,8 +391,8 @@ iter_corner(p4est_iter_corner_info_t *info, void *user_data)
     if (!side->is_ghost)
       continue;
 
+    // The owner of the side with the smallest rank is the owner of the node
     ghost_owner = p4est_find_ghost_owner(d->p4est, d->ghost, side->quadid);
-
     if (ghost_owner < owner)
       owner = ghost_owner;
   }
@@ -388,15 +420,11 @@ iter_corner(p4est_iter_corner_info_t *info, void *user_data)
 }
 
 void
-p4est_new_simplex_mesh_nodes(
-    p4est_simplex_nodes_data_t *d
-    )
+p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
 {
   p4est_t *p4est;
   p4est_ghost_t *ghost;
   p4est_tree_t *tree;
-
-  // int mpisize, mpirank;
 
   p4est_locidx_t num_local_elements;
   size_t tz, t_off;
@@ -405,9 +433,10 @@ p4est_new_simplex_mesh_nodes(
   ghost = d->ghost;
 
   d->mpicomm = sc_MPI_COMM_WORLD;
-  /* mpirank = */ d->mpirank = p4est->mpirank;
-  /* mpisize = */ d->mpisize = p4est->mpisize;
+  d->mpirank = p4est->mpirank;
+  d->mpisize = p4est->mpisize;
 
+  // We compute the tree offsets in the local elements
   t_off = 0;
   d->tree_offsets = sc_array_new_count(sizeof(size_t), p4est->trees->elem_count + 1);
   for (tz = 0; tz < p4est->trees->elem_count; ++tz) {
@@ -431,8 +460,8 @@ p4est_new_simplex_mesh_nodes(
 
   // Initialize all nodes with -1
   memset(d->element_nodes->array, 0xff, num_local_elements*sizeof(element_node_t));
-  // memset(d->element_nodes->array, 0, num_quads*sizeof(element_nodes_t));
 
+  // Find all local nodes
   p4est_iterate(p4est, ghost, d,
       iter_volume, iter_face,
 #ifdef P4_TO_P8
@@ -440,14 +469,13 @@ p4est_new_simplex_mesh_nodes(
 #endif
      iter_corner);
 
-/* }
 
-void
-p4est_simplex_mesh_reoder_nodes(
-    p4est_simplex_nodes_data_t *d)
-{ */
-
-  p4est_locidx_t /* num_local_elements,  */ num_local_nodes;
+  // *** We sort the local nodes according to process rank, with the 
+  // current process nodes first.
+  //
+  // We thus reorder the vertices array and remap element_nodes
+  
+  p4est_locidx_t num_local_nodes;
 
   p4est_locidx_t *proc_offsets, offset;
   size_t *owned;
@@ -459,11 +487,6 @@ p4est_simplex_mesh_reoder_nodes(
   p4est_locidx_t *elem_nodes, *new_elem_nodes, cc;
   sc_array_t *new_vertices;
   sc_array_t *new_element_nodes;
-
-  /* p4est = d->p4est;
-
-  mpisize = p4est->mpisize;
-  mpirank = p4est->mpirank; */
 
   num_local_elements = p4est->local_num_quadrants;
 
@@ -502,7 +525,6 @@ p4est_simplex_mesh_reoder_nodes(
     new_cc = proc_offsets[*owner] + (proc_node_count[*owner]++);
     new_local_nodes[zz] = new_cc;
 
-    // printf("[%d] A %ld -> %d\n", mpirank, zz, new_cc);
     memcpy(sc_array_index(new_vertices, new_cc),
            sc_array_index( d->vertices, zz),
            3*sizeof(double));
@@ -518,7 +540,6 @@ p4est_simplex_mesh_reoder_nodes(
   d->vertices = new_vertices;
 
   // Finally we remap the element_nodes to refer to the new node indices
-
   vnodes = P4EST_DIM_POW(3); // = sizeof(element_node_t) / sizeof(p4est_locidx_t);
 
   new_element_nodes = sc_array_new_count(sizeof(element_node_t),
@@ -552,8 +573,6 @@ p4est_simplex_mesh_reoder_nodes(
   // lnode.sharers : Might need to be constructed in the iterator
 
 }
-
-// Implementations
 
 p4est_simplex_mesh_t *
 p4est_new_simplex_mesh(
@@ -690,6 +709,7 @@ p4est_new_simplex_mesh(
             // NOTE: We observe that for level = 0, all the vertices are independent in p4est_nodes_t
             // so we may assume they have a global index
 
+            
             // TODO: Determine this by global node number
 #if 0
             p4est_locidx_t first = c0;
@@ -804,6 +824,7 @@ p4est_simplex_mesh_destroy(
   sc_array_destroy(smesh->simplicies);
   P4EST_FREE(smesh);
 }
+
 
 
 void
