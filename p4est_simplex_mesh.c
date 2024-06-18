@@ -48,7 +48,7 @@ element_node_t;
 typedef struct
 {
   sc_MPI_Comm mpicomm;
-  int mpirank;
+  int mpirank, mpisize;
 
   p4est_t *p4est;
   p4est_ghost_t *ghost;
@@ -57,10 +57,9 @@ typedef struct
   sc_array_t *tree_offsets;
 
   sc_array_t *owned_count;
-
   sc_array_t *owners;
-  sc_array_t *element_nodes;
 
+  sc_array_t *element_nodes;
   sc_array_t *vertices;
 }
 p4est_simplex_nodes_data_t;
@@ -397,6 +396,8 @@ p4est_new_simplex_mesh_nodes(
   p4est_ghost_t *ghost;
   p4est_tree_t *tree;
 
+  // int mpisize, mpirank;
+
   p4est_locidx_t num_local_elements;
   size_t tz, t_off;
 
@@ -404,7 +405,8 @@ p4est_new_simplex_mesh_nodes(
   ghost = d->ghost;
 
   d->mpicomm = sc_MPI_COMM_WORLD;
-  d->mpirank = p4est->mpirank;
+  /* mpirank = */ d->mpirank = p4est->mpirank;
+  /* mpisize = */ d->mpisize = p4est->mpisize;
 
   t_off = 0;
   d->tree_offsets = sc_array_new_count(sizeof(size_t), p4est->trees->elem_count + 1);
@@ -438,17 +440,14 @@ p4est_new_simplex_mesh_nodes(
 #endif
      iter_corner);
 
-}
+/* }
 
 void
 p4est_simplex_mesh_reoder_nodes(
     p4est_simplex_nodes_data_t *d)
-{
-  p4est_t *p4est;
+{ */
 
-  int mpisize, mpirank;
-
-  p4est_locidx_t num_local_elements,  num_local_nodes;
+  p4est_locidx_t /* num_local_elements,  */ num_local_nodes;
 
   p4est_locidx_t *proc_offsets, offset;
   size_t *owned;
@@ -461,23 +460,23 @@ p4est_simplex_mesh_reoder_nodes(
   sc_array_t *new_vertices;
   sc_array_t *new_element_nodes;
 
-  p4est = d->p4est;
+  /* p4est = d->p4est;
 
   mpisize = p4est->mpisize;
-  mpirank = p4est->mpirank;
+  mpirank = p4est->mpirank; */
 
   num_local_elements = p4est->local_num_quadrants;
 
   // We begin by computing where to put the nodes owned
   // by the respective processes
 
-  proc_offsets = P4EST_ALLOC(p4est_locidx_t, mpisize + 1);
+  proc_offsets = P4EST_ALLOC(p4est_locidx_t, d->mpisize + 1);
 
-  owned = sc_array_index(d->owned_count, mpirank);
+  owned = sc_array_index(d->owned_count, d->mpirank);
   offset = *owned;
 
-  for (int zz=0; zz < mpisize; ++zz) {
-    if (zz == mpirank) { // We put all locally owned nodes first
+  for (int zz=0; zz < d->mpisize; ++zz) {
+    if (zz == d->mpirank) { // We put all locally owned nodes first
       proc_offsets[zz] = 0;
       continue;
     }
@@ -488,12 +487,12 @@ p4est_simplex_mesh_reoder_nodes(
     offset += *owned;
   }
 
-  num_local_nodes = proc_offsets[mpisize] = offset;
+  num_local_nodes = proc_offsets[d->mpisize] = offset;
 
   // Now we move the vertices into the new order and compute
   // the new location for each local node
 
-  proc_node_count = P4EST_ALLOC_ZERO(p4est_locidx_t, mpisize);
+  proc_node_count = P4EST_ALLOC_ZERO(p4est_locidx_t, d->mpisize);
   new_local_nodes = P4EST_ALLOC(p4est_locidx_t, num_local_nodes);
   new_vertices = sc_array_new_count(3*sizeof(double), num_local_nodes);
 
@@ -512,8 +511,10 @@ p4est_simplex_mesh_reoder_nodes(
   P4EST_FREE(proc_offsets);
   P4EST_FREE(proc_node_count);
 
-  sc_array_destroy(d->vertices);
   sc_array_destroy(d->owners);
+  sc_array_destroy(d->owned_count);
+
+  sc_array_destroy(d->vertices);
   d->vertices = new_vertices;
 
   // Finally we remap the element_nodes to refer to the new node indices
@@ -538,6 +539,7 @@ p4est_simplex_mesh_reoder_nodes(
   sc_array_destroy(d->element_nodes);
   d->element_nodes = new_element_nodes;
 
+
   // p4est_lnodes_t lnode;
   // lnode.owned_count = local_count;
   // lnode.num_local_nodes = num_local_nodes;
@@ -549,7 +551,6 @@ p4est_simplex_mesh_reoder_nodes(
 
   // lnode.sharers : Might need to be constructed in the iterator
 
-  sc_array_destroy(d->owned_count);
 }
 
 // Implementations
@@ -588,7 +589,7 @@ p4est_new_simplex_mesh(
   d.geom = geom;
 
   p4est_new_simplex_mesh_nodes(&d);
-  p4est_simplex_mesh_reoder_nodes(&d);
+  // p4est_simplex_mesh_reoder_nodes(&d);
 
   simplicies = sc_array_new((P4EST_DIM + 1)*sizeof(p4est_locidx_t));
 
