@@ -1,3 +1,16 @@
 
+- Construct sharers
+
+
+
+- Send the owned nodes shared with other processes nodes, (in order of local nodes)
+   and the owned_count.
+
+- Receive the nodes, and compute the nonlocal_nodes (global indices)
+      and global_offset.
+
+
 - FIX: Determine face split in 3D, by global node id
+
+
 

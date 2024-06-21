@@ -1,5 +1,6 @@
+#include <string.h>
 #ifdef VIM_LS
-#include <p4est_to_p8est.h>
+// #include <p4est_to_p8est.h>
 #endif
 
 #include <sc_options.h>
@@ -19,18 +20,6 @@
 #endif
 
 #include "utils.c"
-
-static char *p4est_connectivity_names[] = {
-#ifndef P4_TO_P8
-  "brick23","corner","cubed","disk","icosahedron","moebius",
-  "periodic","pillow","rotwrap","star","shell2d","disk2d",
-  "bowtie","unit","sphere2d",
-#else
-  "brick235","periodic","rotcubes","rotwrap","shell","sphere",
-  "twocubes","twowrap","unit",
-#endif
-  NULL
-};
 
 typedef struct
 {
@@ -63,7 +52,6 @@ context_t;
 static int refine_fn (p4est_t * p4est, p4est_topidx_t which_tree, p4est_quadrant_t *quadrant)
 {
   context_t *g = (context_t *) p4est->user_pointer;
-  options_t *opts = g->opts;
 
   int refine_level = g->opts->maxlevel;
   if ((int) quadrant->level >= (refine_level - (int) (which_tree % 3))) {
@@ -166,7 +154,6 @@ destroy_context(context_t *g)
     p4est_geometry_destroy(g->geom);
 }
 
-
 int
 main(int argc, char **argv) {
   int mpiret;
@@ -190,19 +177,11 @@ main(int argc, char **argv) {
   /* Does this really need to be before the parsing? */
   sc_init (g->mpicomm, 1, 1, NULL, SC_LP_DEFAULT);
 
-  // User info flags
-  int help = 0;
-  int list_conn = 0;
-
-  smesh = NULL;
-
   /* Initialize default option values */
   opts->minlevel = 2;
   opts->maxlevel = 5;
   opts->conn = "unit";
   opts->mshpath = NULL;  // Defaults to "{opts->conn}.msh"
-
-  opts->hangine_node_level = 2;
 
   sc_opts = sc_options_new (argv[0]);
   sc_options_add_int (sc_opts, 'l', "minlevel", &opts->minlevel, opts->minlevel, "Lowest level");
@@ -218,8 +197,8 @@ main(int argc, char **argv) {
   sc_options_add_string (sc_opts, 'm', "msh", &opts->mshpath, opts->mshpath, "MSH base filename");
   sc_options_add_string (sc_opts, 'c', "conn", &opts->conn, opts->conn, "Name of the connectivity");
 
-  // sc_options_add_bool (sc_opts, 'h', "help", &help, help, "Print help message");
-  // sc_options_add_bool (sc_opts, 0, "list-conn", &list_conn, list_conn, "Lists the available connectivity 'conn' options");
+
+  smesh = NULL;
 
   exitcode = 0;
   do {
@@ -235,20 +214,6 @@ main(int argc, char **argv) {
       g->errmsg = "Too many arguments";
       sc_options_print_usage (p4est_package_id, SC_LP_ERROR, sc_opts, NULL);
       exitcode = 1;
-      break;
-    }
-
-    if (help) {
-      sc_options_print_usage (p4est_package_id, SC_LP_INFO, sc_opts, NULL);
-      exitcode = 0;
-      break;
-    }
-
-    if (list_conn) {
-      char **conn_name = p4est_connectivity_names;
-      for (;*conn_name; ++conn_name)
-        printf("  %s\n", *conn_name);
-      exitcode = 0;
       break;
     }
 
@@ -270,21 +235,23 @@ main(int argc, char **argv) {
       break;
 
 #ifndef P4_TO_P8
-    sprintf(filepath, "out/box_2d_%s_%d-%d", opts->conn, opts->minlevel, opts->maxlevel);
+    sprintf(filepath, "out/box_2d_%s_%d-%d", opts->mshpath, opts->minlevel, opts->maxlevel);
 #else
-    sprintf(filepath, "out/box_3d_%s_%d-%d", opts->conn, opts->minlevel, opts->maxlevel);
+    sprintf(filepath, "out/box_3d_%s_%d-%d", opts->mshpath, opts->minlevel, opts->maxlevel);
 #endif
 
     p4est_vtk_write_file(g->p4est, g->geom, filepath);
 
-    // sprintf(filepath, "out/sx_%s.msh", g->opts->conn);
-    // write_gmsh_file(filepath, smesh);
-
+    if (opts->mshpath == NULL) {
 #ifndef P4_TO_P8
-    sprintf(filepath, "out/sx_2d_%s_%d-%d_%d.vtk", opts->conn, opts->minlevel, opts->maxlevel, g->mpirank);
+      sprintf(filepath, "out/sx_2d_%s_%d-%d_%d.vtk", opts->conn, opts->minlevel, opts->maxlevel, g->mpirank);
 #else
-    sprintf(filepath, "out/sx_3d_%s_%d-%d_%d.vtk", opts->conn, opts->minlevel, opts->maxlevel, g->mpirank);
+      sprintf(filepath, "out/sx_3d_%s_%d-%d_%d.vtk", opts->conn, opts->minlevel, opts->maxlevel, g->mpirank);
 #endif
+    } else {
+      strcpy(filepath, opts->mshpath);
+    }
+
     p4est_simplex_mesh_write_vtk_file(filepath, smesh);
 
   } while (0);
@@ -307,4 +274,3 @@ main(int argc, char **argv) {
 
   return exitcode ? EXIT_FAILURE : EXIT_SUCCESS;
 }
-

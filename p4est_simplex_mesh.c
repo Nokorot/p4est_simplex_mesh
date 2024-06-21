@@ -3,6 +3,7 @@
 #include <sc_containers.h>
 #include <sc_mpi.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -45,6 +46,18 @@ typedef struct {
 }
 element_node_t;
 
+typedef enum {
+  NODE_TYPE_VOLUME = 0,
+  NODE_TYPE_FACE   = 1,
+#ifdef P4_TO_P8
+  NODE_TYPE_EDGE   = 1 + P4EST_FACES,
+  NODE_TYPE_CORNER = 1 + P4EST_FACES + P8EST_EDGES,
+#else
+  NODE_TYPE_CORNER = 1 + P4EST_FACES,
+#endif
+}
+p4est_simplex_element_node_type_t;
+
 typedef struct
 {
   sc_MPI_Comm mpicomm;
@@ -58,6 +71,9 @@ typedef struct
 
   sc_array_t *owned_count;
   sc_array_t *owners;
+
+  sc_array_t **shared_element_nodes;
+
 
   sc_array_t *element_nodes;
   sc_array_t *vertices;
@@ -158,6 +174,7 @@ p4est_find_ghost_owner(
   p4est_quadrant_t *ghost_quad;
   p4est_topidx_t treeid;
 
+  // Could alternatively do a bsearch in ghost->proc_offsets
 
   ghost_quad = sc_array_index(&ghost->ghosts, ghostid);
   treeid = ghost_quad->p.piggy3.which_tree;
@@ -168,6 +185,54 @@ p4est_find_ghost_owner(
             ghost_quad,
             p4est->mpirank);
 }
+
+typedef struct {
+  p4est_locidx_t remote_local_number; // From ghost quad
+                                      // May be used directly in element_nodes, when received
+  p4est_locidx_t vnode_offset;
+  p4est_locidx_t node_index;
+}
+shared_node_t;
+
+void
+p4est_simplex_push_sharer (
+    p4est_simplex_nodes_data_t *d,
+    p4est_locidx_t ghostid,
+    p4est_locidx_t remote_local_number,
+    int8_t element_vnode_offset,
+    p4est_locidx_t node_index
+    )
+{
+  int rank;
+
+  sc_array_t *shared_nodes;
+  shared_node_t *last, *new;
+
+  rank = p4est_find_ghost_owner(d->p4est, d->ghost, ghostid);
+  shared_nodes = d->shared_element_nodes[rank];
+
+  if (!shared_nodes) {
+    shared_nodes = sc_array_new(sizeof(shared_node_t));
+    d->shared_element_nodes[rank] = shared_nodes;
+  }
+
+  // We assume that the nodes are added in increasing (node_index) order
+  // and this only the latest can have the same node_index.
+  // We only need to send the node once to each other process.
+  if (shared_nodes->elem_count) {
+    last = sc_array_index(shared_nodes, shared_nodes->elem_count - 1);
+
+    if (last->node_index == node_index)
+      return;
+  }
+
+  new = sc_array_push(shared_nodes);
+
+  new->remote_local_number = remote_local_number;
+  new->vnode_offset = element_vnode_offset;
+  new->node_index = node_index;
+}
+
 
 // ITERATORS
 void
@@ -187,7 +252,6 @@ iter_volume(p4est_iter_volume_info_t *info, void *user_data)
   p4est_quad_center_coords(info->quad, abc);
 
   owner = d->mpirank;
-
   cc = p4est_simplex_push_node(d, info->treeid, abc, owner);
   elem_node->volume_node = cc;
 }
@@ -251,24 +315,35 @@ iter_face(p4est_iter_face_info_t *info, void *user_data)
   if (!side_full->is.full.is_ghost) {
     elem_node->face_nodes[side_full->face] = cf;
   }
+  else {
+    p4est_simplex_push_sharer(d,
+        side_full->is.full.quadid,
+        side_full->is.full.quad->p.piggy3.local_num,
+        NODE_TYPE_FACE + side_full->face,
+        cf);
+  }
 
   face = side_hanging->face;
 
   for (sz = 0; sz < P4EST_HALF; ++sz) {
-    if (side_hanging->is.hanging.is_ghost[sz])
-      continue;
-
     quad = side_hanging->is.hanging.quad[sz];
     p4est_locidx_t quadid = side_hanging->is.hanging.quadid[sz];
-
-    elem_node = p4est_element_node_get(d, side_hanging->treeid, quadid);
 
     // Compute the corner that is on the centre of the parent face
     int cid = p4est_quadrant_child_id(quad);
     int cfc = p4est_corner_face_corners[cid][face];
-    int c = p4est_face_corners[face][cfc ^ (P4EST_HALF - 1)]; 
+    int c = p4est_face_corners[face][cfc ^ (P4EST_HALF - 1)];
 
-    elem_node->corner_nodes[c] = cf;
+    if (side_hanging->is.hanging.is_ghost[sz]) {
+      p4est_simplex_push_sharer(d,
+          quadid,
+          quad->p.piggy3.local_num,
+          NODE_TYPE_CORNER + c,
+          cf);
+    } else {
+      elem_node = p4est_element_node_get(d, side_hanging->treeid, quadid);
+      elem_node->corner_nodes[c] = cf;
+    }
   }
 }
 
@@ -329,15 +404,24 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
     edge = side->edge;
 
     if (!side->is_hanging) {
-      if (side->is.full.is_ghost)
-        continue;
-
       quad = side->is.full.quad;
       quadid = side->is.full.quadid;
       treeid = side->treeid;
 
-      elem_node = p4est_element_node_get(d, side->treeid, quadid);
-      elem_node->edge_nodes[side->edge] = ce;
+      if (side->is.full.is_ghost) {
+        p4est_simplex_push_sharer(d,
+            quadid,                   // ghostid
+            quad->p.piggy3.local_num,
+            NODE_TYPE_EDGE + side->edge,
+            ce);
+
+        // We don't need to consider the additional nodes for sharing
+        continue;
+      }
+      else {
+        elem_node = p4est_element_node_get(d, side->treeid, quadid);
+        elem_node->edge_nodes[side->edge] = ce;
+      }
 
       for (efz = 0; efz < 2; ++efz) {
         face = p8est_edge_faces[edge][efz];
@@ -352,8 +436,6 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
       }
     } else {
       for (sz = 0; sz < 2; ++sz) {
-        if (side->is.hanging.is_ghost[sz])
-          continue;
 
         quad = side->is.hanging.quad[sz];
         quadid = side->is.hanging.quadid[sz];
@@ -362,8 +444,17 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
         int cfc = p8est_corner_edge_corners[cid][edge];
         int c = p8est_edge_corners[edge][cfc ^ 1];
 
-        elem_node = p4est_element_node_get(d, side->treeid, quadid);
-        elem_node->corner_nodes[c] = ce;
+        if (side->is.hanging.is_ghost[sz]) {
+          p4est_simplex_push_sharer(d,
+              quadid,
+              quad->p.piggy3.local_num,
+              NODE_TYPE_CORNER + c,
+              ce);
+        }
+        else {
+          elem_node = p4est_element_node_get(d, side->treeid, quadid);
+          elem_node->corner_nodes[c] = ce;
+        }
       }
     }
   }
@@ -402,20 +493,25 @@ iter_corner(p4est_iter_corner_info_t *info, void *user_data)
   for (zz = 0; zz < info->sides.elem_count; ++zz) {
     side = sc_array_index(&info->sides, zz);
 
-    if (side->is_ghost)
-      continue;
-
-    if (cc < 0) {
+    if (cc < 0) { // NOTE that this also works if the side is a ghost
       // Add the quad corner node
       double abc[3];
       p4est_quad_corner_coords(side->quad, side->corner, abc);
       cc = p4est_simplex_push_node(d, side->treeid, abc, owner);
     }
 
-    p4est_locidx_t quadid = side->quadid;
-
-    elem_node = p4est_element_node_get(d, side->treeid, quadid);
-    elem_node->corner_nodes[side->corner] = cc;
+    if (side->is_ghost) {
+      p4est_simplex_push_sharer(d,
+          side->quadid,
+          side->quad->p.piggy3.local_num,
+          NODE_TYPE_CORNER + side->corner,
+          cc);
+    }
+    else
+    {
+      elem_node = p4est_element_node_get(d, side->treeid, side->quadid);
+      elem_node->corner_nodes[side->corner] = cc;
+    }
   }
 }
 
@@ -449,6 +545,8 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
   d->owners       = sc_array_new(sizeof(int));
   d->owned_count  = sc_array_new_count(sizeof(size_t), p4est->mpisize);
 
+  d->shared_element_nodes = P4EST_ALLOC_ZERO(sc_array_t *, d->mpisize);
+
   for (size_t zz=0; zz < p4est->mpisize; ++zz) {
     size_t *owned = sc_array_index(d->owned_count, zz);
     *owned = 0;
@@ -457,6 +555,7 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
   num_local_elements = p4est->local_num_quadrants;
   d->element_nodes = sc_array_new_count(sizeof(element_node_t),
                                         num_local_elements);
+
 
   // Initialize all nodes with -1
   memset(d->element_nodes->array, 0xff, num_local_elements*sizeof(element_node_t));
@@ -470,11 +569,44 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
      iter_corner);
 
 
-  // *** We sort the local nodes according to process rank, with the 
+  shared_node_t *snode;
+
+  for (int j=0; j < d->mpisize; ++j) {
+    sc_array_t *shared_nodes = d->shared_element_nodes[j];
+    if (!shared_nodes)
+      continue;
+
+    printf("[%d] rr %d\n", d->mpirank, j);
+    for (size_t iz=0; iz<shared_nodes->elem_count; ++iz) {
+     snode = sc_array_index(shared_nodes, iz);
+
+      int *owner = sc_array_index(d->owners, snode->node_index);
+     if (*owner == d->mpirank)
+        printf(" * ");
+     else
+        printf("   ");
+
+     printf("[%d] A %d -> %d, %d\n", d->mpirank,
+         snode->node_index,
+         snode->remote_local_number,
+         snode->vnode_offset);
+    }
+
+    sc_array_destroy(shared_nodes);
+  }
+
+  P4EST_FREE(d->shared_element_nodes);
+
+
+  sc_array_destroy(d->owners);
+  sc_array_destroy(d->owned_count);
+  return;
+
+  // *** We sort the local nodes according to process rank, with the
   // current process nodes first.
   //
   // We thus reorder the vertices array and remap element_nodes
-  
+
   p4est_locidx_t num_local_nodes;
 
   p4est_locidx_t *proc_offsets, offset;
@@ -709,7 +841,6 @@ p4est_new_simplex_mesh(
             // NOTE: We observe that for level = 0, all the vertices are independent in p4est_nodes_t
             // so we may assume they have a global index
 
-            
             // TODO: Determine this by global node number
 #if 0
             p4est_locidx_t first = c0;
