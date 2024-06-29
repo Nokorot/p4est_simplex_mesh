@@ -235,9 +235,9 @@ main(int argc, char **argv) {
       break;
 
 #ifndef P4_TO_P8
-    sprintf(filepath, "out/box_2d_%s_%d-%d", opts->mshpath, opts->minlevel, opts->maxlevel);
+    sprintf(filepath, "out/box_2d_%s_%d-%d", opts->conn, opts->minlevel, opts->maxlevel);
 #else
-    sprintf(filepath, "out/box_3d_%s_%d-%d", opts->mshpath, opts->minlevel, opts->maxlevel);
+    sprintf(filepath, "out/box_3d_%s_%d-%d", opts->conn, opts->minlevel, opts->maxlevel);
 #endif
 
     p4est_vtk_write_file(g->p4est, g->geom, filepath);
