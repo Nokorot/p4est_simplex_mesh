@@ -1,4 +1,6 @@
 
+
+- FIX: Additional faces are sometimes added twice
 - FIX: Determine face split in 3D, by global node id
 - Replace the owned_count sharing with MPI_All_Gather
 - Change ownership of hanging nodes to be the not full side

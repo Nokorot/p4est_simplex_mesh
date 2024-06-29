@@ -907,6 +907,16 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
       global_node_count, global_offset);
 
 
+  for (int zz = 0; zz < owned_count; zz++) {
+    vx = sc_array_index(d->vertices, zz);
+
+    printf("[%d] LocNode  %2d, -> %2ld,   (%.4f, %.4f, %.4f)\n", p4est->mpirank,
+        zz,
+        global_offset + zz,
+        vx[0], vx[1], vx[2]);
+  }
+
+
   // if (send_requests->elem_count > 0) {
   //   mpiret = sc_MPI_Waitall ((int) send_requests->elem_count,
   //                            (sc_MPI_Request *) send_requests->array,
