@@ -11,6 +11,7 @@
 
 #ifdef VIM_LS
 // #include <p4est_to_p8est.h>
+#define P4EST_SIMPLEX_DEBUG
 #endif
 
 #include <p4est_base.h>
@@ -81,6 +82,20 @@ typedef struct
   sc_array_t *vertices;
 }
 p4est_simplex_nodes_data_t;
+
+
+typedef struct {
+  union {
+    p4est_locidx_t node_index;
+    p4est_locidx_t node_count;
+  };
+
+#ifdef P4EST_SIMPLEX_DEBUG
+  double x, y, z;
+#endif
+}
+shared_node_comm_data_t;
+
 
 
 element_node_t *
@@ -659,21 +674,21 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
 // Send node indices
 
   int mpiret;
-  p4est_locidx_t *lp;
+  shared_node_comm_data_t *lp;
   sc_array_t *send, *send_buf, *send_requests;
-  send_buf = P4EST_ALLOC (sc_array_t, d->mpisize);
 
   int num_send_procs;
   int send_count, total_sent;
-
   int i, j;
+  double *vx;
 
+  send_buf = P4EST_ALLOC (sc_array_t, d->mpisize);
 
   printf("[%d] Num local nodes %ld\n", p4est->mpirank, d->vertices->elem_count);
   printf("[%d] Owned count %d\n", p4est->mpirank, owned_count);
 
   for (i = 0; i < d->mpisize; i++) {
-    sc_array_init (&(send_buf[i]), sizeof (p4est_locidx_t));
+    sc_array_init (&(send_buf[i]), sizeof (shared_node_comm_data_t));
   }
 
   send_requests = sc_array_new(sizeof(sc_MPI_Request));
@@ -689,7 +704,7 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
     send = &(send_buf[j]);
 
     lp = sc_array_push(send);
-    *lp = num_owned_nodes;
+    lp->node_count = num_owned_nodes;
 
     sc_array_t *shared_nodes = d->shared_element_nodes[j];
     if (shared_nodes) {
@@ -697,49 +712,54 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
       for (size_t iz=0; iz<shared_nodes->elem_count; ++iz) {
         snode = sc_array_index(shared_nodes, iz);
 
-          
+
         // Remap shared_nodes, might want to do in separate loop
         cc = snode->node_index;
         snode->node_index = new_local_nodes[cc];
 
+        vx = sc_array_index(d->vertices, snode->node_index);
+
         if (snode->node_index < num_owned_nodes) {
           lp = sc_array_push(send);
-          *lp = snode->node_index;
+          lp->node_index = snode->node_index;
+
+#ifdef P4EST_SIMPLEX_DEBUG
+          lp->x = vx[0];
+          lp->y = vx[1];
+          lp->z = vx[2];
+#endif
 
            printf(" * ");
         } else {
            printf("   ");
         }
 
-        double *vx;
-        vx = sc_array_index(d->vertices, snode->node_index);
 
+#ifdef P4EST_SIMPLEX_DEBUG
         printf("[%d] SA %2d -> %2d, %2d,    (%.4f, %.4f, %.4f)\n", d->mpirank,
             snode->node_index,
             snode->remote_local_number,
             snode->vnode_offset,
-            vx[0], vx[1], vx[2]
+            lp->x, lp->y, lp->z
             );
+#endif
 
       }
     }
 
     num_send_procs++;
     send_count = send->elem_count;
-    // if (send_count) {
-      sc_MPI_Request *send_request = sc_array_push(send_requests);
-      mpiret = sc_MPI_Isend(
-                  send->array,
-                  (int) (send_count * sizeof(p4est_locidx_t)),
-                  sc_MPI_BYTE, j, P4EST_COMM_SIMPLEX_PASS,
-                  p4est->mpicomm, send_request);
-      SC_CHECK_MPI(mpiret);
+    sc_MPI_Request *send_request = sc_array_push(send_requests);
+    mpiret = sc_MPI_Isend(
+                send->array,
+                (int) (send_count * sizeof(shared_node_comm_data_t)),
+                sc_MPI_BYTE, j, P4EST_COMM_SIMPLEX_PASS,
+                p4est->mpicomm, send_request);
+    SC_CHECK_MPI(mpiret);
 
-      // num_send_procs++;
-      total_sent += (send_count * sizeof (p4est_locidx_t));
+    total_sent += (send_count * sizeof (shared_node_comm_data_t));
 
-      printf("[%d] Sending %d indices to %d\n", p4est->mpirank, send_count, j);
-    // }
+    printf("[%d] Sending %d indices to %d\n", p4est->mpirank, send_count, j);
   }
 
 
@@ -756,17 +776,14 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
 
 
   sc_array_t *recv, *recv_buf;
-
   sc_MPI_Status probe_status, recv_status;
 
   int byte_count, elem_count;
-
-  p4est_locidx_t *value;
   int node_count;
 
   recv_buf = P4EST_ALLOC (sc_array_t, d->mpisize);
   for (i = 0; i < d->mpisize; i++) {
-    sc_array_init (&(recv_buf[i]), sizeof (p4est_locidx_t));
+    sc_array_init (&(recv_buf[i]), sizeof (shared_node_comm_data_t));
   }
 
   for (i = 0; i < d->mpisize - 1; i++) {
@@ -782,19 +799,22 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
     mpiret = sc_MPI_Get_count (&probe_status, sc_MPI_BYTE, &byte_count);
     SC_CHECK_MPI (mpiret);
     printf("[%d] FOUND: %d bytes\n", p4est->mpirank, byte_count);
-    P4EST_ASSERT (byte_count % ((int) sizeof (p4est_locidx_t)) == 0);
-    elem_count = ((size_t) byte_count) / sizeof (p4est_locidx_t);
+    P4EST_ASSERT (byte_count % ((int) sizeof (shared_node_comm_data_t)) == 0);
+    elem_count = ((size_t) byte_count) / sizeof (shared_node_comm_data_t);
     sc_array_resize (recv, elem_count);
     mpiret = sc_MPI_Recv (recv->array, byte_count, sc_MPI_BYTE, j,
                           P4EST_COMM_SIMPLEX_PASS, p4est->mpicomm,
                           &recv_status);
     SC_CHECK_MPI (mpiret);
+
+
+
     printf("[%d] Received %d indices from %d\n", p4est->mpirank, elem_count, j);
 
-    value = sc_array_index(recv, 0);
-    global_owned_count[j] = *value;
+    lp = sc_array_index(recv, 0);
+    global_owned_count[j] = lp->node_count;
 
-    printf("[%d] R process %d has %d nodes\n", d->mpirank, j, *value);
+    printf("[%d] R process %d has %d nodes\n", d->mpirank, j, lp->node_count);
 
     node_count = 0;
 
@@ -818,19 +838,20 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
         if (proc_offsets[j] <= cc && cc < next_proc_off) {
           lp = sc_array_index(recv, 1 + node_count);
 
-          nonlocal_nodes[ snode->node_index - owned_count ] = *lp;
+          nonlocal_nodes[ snode->node_index - owned_count ] = lp->node_index;
 
-          double *vx;
           vx = sc_array_index(d->vertices, snode->node_index);
 
-          printf("[%d] RA  %2d, %2d -> %2d,    (%.4f, %.4f, %.4f)\n", p4est->mpirank,
+          printf("[%d] RA  %2d, %2d -> %2d,    (%.4f, %.4f, %.4f) -> (%.4f, %.4f, %.4f)\n", p4est->mpirank,
               proc_offsets[j],
-              // next_proc_off,
-              // j,
               snode->node_index,
-              *lp,
-              vx[0], vx[1], vx[2]
+              lp->node_index,
+              vx[0], vx[1], vx[2],
+              lp->x, lp->y, lp->z
               );
+
+          P4EST_ASSERT(vx[0] == lp->x && vx[1] == lp->y && vx[2] == lp->z);
+
           node_count++;
         }
       }

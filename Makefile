@@ -3,7 +3,9 @@ CC=mpicc
 
 CFLAGS=-ggdb -lp4est -lsc -L../local/lib \
 			 -I../local/include -I${MPI_INCLUDE} -I${MPI_LIB} \
-			 -Wl,-rpath="${HOME}/Thisis/local/lib"
+			 -Wl,-rpath="${HOME}/Thisis/local/lib" \
+			 -DP4EST_SIMPLEX_DEBUG \
+			 -DP4EST_ENABLE_DEBUG
 
 .PHONY: alla
 
