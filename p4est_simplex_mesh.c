@@ -14,6 +14,7 @@
 #define P4EST_SIMPLEX_DEBUG
 #endif
 
+
 #include <p4est_base.h>
 
 #ifndef P4_TO_P8
@@ -383,20 +384,40 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
   p4est_locidx_t ce, cf;
   size_t sz, zz, efz;
   int face, edge;
+  int faces_count;
 
   d = user_data;
+
+  // We determine the number of faces
+  faces_count = 0;
+  for (zz = 0; zz < info->sides.elem_count; ++zz) {
+    side = sc_array_index(&info->sides, zz);
+    faces_count = SC_MAX(faces_count,
+                    1 + SC_MAX(side->faces[0], side->faces[1]));
+  }
+
+  p4est_locidx_t *face_nodes;
+  face_nodes = P4EST_ALLOC(p4est_locidx_t, faces_count);
+  memset(face_nodes, 0xff, sizeof(p4est_locidx_t) * faces_count);
 
   // Find a full and a hanging face
   side_full = NULL;
   side_hanging = NULL;
   for (zz = 0; zz < info->sides.elem_count; ++zz) {
     side = sc_array_index(&info->sides, zz);
-    if (side->is_hanging)
+    if (side->is_hanging) {
       side_hanging = side;
+
+      // If the face is hanging we don't wont to add a
+      // face node here.
+      face_nodes[side->faces[0]] = 0;
+      face_nodes[side->faces[1]] = 0;
+    } 
     else {
       side_full = side;
 
       // Only a full side may be the owner
+      // TODO:   I think the hanging side would be a better owner
       owner = !(side->is.full.is_ghost)
                   ? d->mpirank
                   : p4est_find_ghost_owner(
@@ -405,8 +426,10 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
   }
 
   // If no side is hanging we will not add an edge node
-  if (!side_hanging)
+  if (!side_hanging) {
+    P4EST_FREE(face_nodes);
     return;
+  }
 
   SC_CHECK_ABORT(side_full, "Got edge with only hanging sides");
 
@@ -419,11 +442,11 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
   for (zz = 0; zz < info->sides.elem_count; ++zz) {
     side = sc_array_index(&info->sides, zz);
     edge = side->edge;
+    treeid = side->treeid;
 
     if (!side->is_hanging) {
       quad = side->is.full.quad;
       quadid = side->is.full.quadid;
-      treeid = side->treeid;
 
       if (side->is.full.is_ghost) {
         p4est_simplex_push_sharer(d,
@@ -431,29 +454,54 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
             quad->p.piggy3.local_num,
             NODE_TYPE_EDGE + side->edge,
             ce);
-
-        // We don't need to consider the additional face nodes for sharing
-        continue;
       }
       else {
         elem_node = p4est_element_node_get(d, side->treeid, quadid);
         elem_node->edge_nodes[side->edge] = ce;
       }
 
+      // For each face adjacent to a hanging edge, we also add a face node
       for (efz = 0; efz < 2; ++efz) {
         face = p8est_edge_faces[edge][efz];
 
-        if (elem_node->face_nodes[face] < 0) {
+        // We check if we have already added the face node
+        // (and if it is on a hanging face)
+        if (face_nodes[ side->faces[efz] ] == -1) {
           // Add face node
           p4est_quad_face_center_coords(quad, face, abc);
-
           cf = p4est_simplex_push_node(d, treeid, abc, owner);
-          elem_node->face_nodes[face] = cf;
+
+          if (side->is.full.is_ghost) {
+            p4est_simplex_push_sharer(d,
+                quadid,                   // ghostid
+                quad->p.piggy3.local_num,
+                NODE_TYPE_FACE + face,
+                cf);
+          }
+          else {
+            elem_node->face_nodes[face] = cf;
+          }
+
+          face_nodes[side->faces[efz]] = cf;
+        }
+        else if (elem_node->face_nodes[face] < 0)
+        {
+          // We record the new face node also on this side
+          if (side->is.full.is_ghost) {
+            p4est_simplex_push_sharer(d,
+                quadid,                   // ghostid
+                quad->p.piggy3.local_num,
+                NODE_TYPE_FACE + face,
+                face_nodes[ side->faces[efz] ]);
+          }
+          else {
+            elem_node->face_nodes[face] = face_nodes[ side->faces[efz] ];
+          }
+
         }
       }
     } else {
       for (sz = 0; sz < 2; ++sz) {
-
         quad = side->is.hanging.quad[sz];
         quadid = side->is.hanging.quadid[sz];
 
@@ -475,6 +523,8 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
       }
     }
   }
+
+  P4EST_FREE(face_nodes);
 }
 #endif
 
