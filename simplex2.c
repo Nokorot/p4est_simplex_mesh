@@ -187,7 +187,7 @@ main(int argc, char **argv) {
   sc_options_add_int (sc_opts, 'l', "minlevel", &opts->minlevel, opts->minlevel, "Lowest level");
   sc_options_add_int (sc_opts, 'L', "maxlevel", &opts->maxlevel, opts->maxlevel, "Highest level");
 
-  sc_options_add_int (sc_opts, 'h', "hanging-node-level", &opts->hangine_node_level, opts->hangine_node_level, 
+  sc_options_add_int (sc_opts, 'h', "hanging-node-level", &opts->hangine_node_level, opts->hangine_node_level,
       "This determines what hanging nodes to include. h=0,1,2\n"
       // " h=-1: Do not add element centre nodes either,\n"
       " h=0: Include no hanging nodes,\n"

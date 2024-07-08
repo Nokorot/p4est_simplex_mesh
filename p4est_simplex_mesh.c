@@ -410,9 +410,9 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
 
       // If the face is hanging we don't wont to add a
       // face node here.
-      face_nodes[side->faces[0]] = 0;
-      face_nodes[side->faces[1]] = 0;
-    } 
+      face_nodes[side->faces[0]] = -3;
+      face_nodes[side->faces[1]] = -3;
+    }
     else {
       side_full = side;
 
@@ -422,6 +422,11 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
                   ? d->mpirank
                   : p4est_find_ghost_owner(
                       d->p4est, d->ghost, side->is.full.quadid);
+
+      if (!side->is.full.is_ghost) {
+        face_nodes[side->faces[0]] = -2;
+        face_nodes[side->faces[1]] = -2;
+      }
     }
   }
 
@@ -464,41 +469,38 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
       for (efz = 0; efz < 2; ++efz) {
         face = p8est_edge_faces[edge][efz];
 
-        // We check if we have already added the face node
-        // (and if it is on a hanging face)
-        if (face_nodes[ side->faces[efz] ] == -1) {
+        if (elem_node->face_nodes[face] >= 0)
+            continue;
+
+        cf = face_nodes[ side->faces[efz] ];
+
+        // This checks that we should add a new node,
+        // if the node is already added the value is >= 0
+        // if it is on a face between ghosts the value is == -1
+        // and if it is on a hanging face the value is == -3
+        if (cf == -2) {
           // Add face node
           p4est_quad_face_center_coords(quad, face, abc);
           cf = p4est_simplex_push_node(d, treeid, abc, owner);
-
-          if (side->is.full.is_ghost) {
-            p4est_simplex_push_sharer(d,
-                quadid,                   // ghostid
-                quad->p.piggy3.local_num,
-                NODE_TYPE_FACE + face,
-                cf);
-          }
-          else {
-            elem_node->face_nodes[face] = cf;
-          }
-
           face_nodes[side->faces[efz]] = cf;
+          // printf("[%d] GA %d %d %d\n", d->mpirank, efz, side->faces[efz], face_nodes[ side->faces[efz] ]);
         }
-        else if (elem_node->face_nodes[face] < 0)
+        else if (cf < 0)
         {
-          // We record the new face node also on this side
-          if (side->is.full.is_ghost) {
-            p4est_simplex_push_sharer(d,
-                quadid,                   // ghostid
-                quad->p.piggy3.local_num,
-                NODE_TYPE_FACE + face,
-                face_nodes[ side->faces[efz] ]);
-          }
-          else {
-            elem_node->face_nodes[face] = face_nodes[ side->faces[efz] ];
-          }
-
+          continue;
         }
+
+        if (side->is.full.is_ghost) {
+          p4est_simplex_push_sharer(d,
+              quadid,                   // ghostid
+              quad->p.piggy3.local_num,
+              NODE_TYPE_FACE + face,
+              cf);
+        }
+        else {
+          elem_node->face_nodes[face] = cf;
+        }
+
       }
     } else {
       for (sz = 0; sz < 2; ++sz) {
@@ -786,7 +788,8 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
 
 
 #ifdef P4EST_SIMPLEX_DEBUG
-        printf("[%d] SA %2d -> %2d, %2d,    (%.4f, %.4f, %.4f)\n", d->mpirank,
+        printf("[%d] SA %2d -> %2d -> %2d, %2d,    (%.4f, %.4f, %.4f)\n", d->mpirank,
+            cc,
             snode->node_index,
             snode->remote_local_number,
             snode->vnode_offset,
@@ -894,6 +897,7 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
 
           vx = sc_array_index(d->vertices, snode->node_index);
 
+#ifdef P4EST_SIMPLEX_DEBUG
           printf("[%d] RA  %2d, %2d -> %2d,    (%.4f, %.4f, %.4f) -> (%.4f, %.4f, %.4f)\n", p4est->mpirank,
               proc_offsets[proc],
               snode->node_index,
@@ -902,7 +906,10 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
               lp->x, lp->y, lp->z
               );
 
-          P4EST_ASSERT(vx[0] == lp->x && vx[1] == lp->y && vx[2] == lp->z);
+          if (vx[0] != lp->x && vx[1] != lp->y && vx[2] != lp->z) {
+            SC_ABORT1("[%d] Send cords are incorrect\n", p4est->mpirank);
+          }
+#endif
 
           node_count++;
         }
