@@ -10,7 +10,7 @@
 #include "utils.c"
 
 #ifdef VIM_LS
-// #include <p4est_to_p8est.h>
+#include <p4est_to_p8est.h>
 #define P4EST_SIMPLEX_DEBUG
 #endif
 
@@ -205,28 +205,34 @@ p4est_find_ghost_owner(
 }
 
 typedef struct {
-  p4est_locidx_t remote_local_number; // From ghost quad
-                                      // May be used directly in element_nodes, when received
   p4est_locidx_t vnode_offset;
   p4est_locidx_t node_index;
 }
 shared_node_t;
 
 void
-p4est_simplex_push_sharer (
+p4est_simplex_record_node (
     p4est_simplex_nodes_data_t *d,
-    p4est_locidx_t ghostid,
-    p4est_locidx_t remote_local_number,
-    int8_t element_vnode_offset,
+    p4est_topidx_t treeid,
+    p4est_locidx_t quadid,
+    int8_t is_ghost,
+    int8_t vnode_offset,
     p4est_locidx_t node_index
     )
 {
   int rank;
 
+  element_node_t *elem_node;
   sc_array_t *shared_nodes;
   shared_node_t *last, *new;
 
-  rank = p4est_find_ghost_owner(d->p4est, d->ghost, ghostid);
+  if (!is_ghost) {
+    elem_node = p4est_element_node_get(d, treeid, quadid);
+    ((p4est_locidx_t *) elem_node)[vnode_offset] = node_index;
+    return;
+  }
+
+  rank = p4est_find_ghost_owner(d->p4est, d->ghost, quadid);
   shared_nodes = d->shared_element_nodes[rank];
 
   if (!shared_nodes) {
@@ -246,11 +252,24 @@ p4est_simplex_push_sharer (
 
   new = sc_array_push(shared_nodes);
 
-  new->remote_local_number = remote_local_number;
-  new->vnode_offset = element_vnode_offset;
+  new->vnode_offset = vnode_offset;
   new->node_index = node_index;
 }
 
+int8_t
+p4est_simplex_is_node_recorded (
+    p4est_simplex_nodes_data_t *d,
+    p4est_topidx_t treeid,
+    p4est_locidx_t quadid,
+    int8_t element_vnode_offset)
+{
+  p4est_locidx_t *elem_node, *toff;
+
+  toff = sc_array_index(d->tree_offsets, treeid);
+  elem_node =  sc_array_index(d->element_nodes, *toff + quadid);
+
+  return 0 <= elem_node[element_vnode_offset];
+}
 
 // ITERATORS
 void
@@ -330,38 +349,30 @@ iter_face(p4est_iter_face_info_t *info, void *user_data)
     cf = p4est_simplex_push_node(d, side_full->treeid, abc, owner);
   }
 
-  if (!side_full->is.full.is_ghost) {
-    elem_node->face_nodes[side_full->face] = cf;
-  }
-  else {
-    p4est_simplex_push_sharer(d,
-        side_full->is.full.quadid,
-        side_full->is.full.quad->p.piggy3.local_num,
-        NODE_TYPE_FACE + side_full->face,
-        cf);
-  }
+  p4est_simplex_record_node(d,
+      side_full->treeid,
+      side_full->is.full.quadid,
+      side_full->is.full.is_ghost,
+      NODE_TYPE_FACE + side_full->face,
+      cf);
+
 
   face = side_hanging->face;
 
   for (sz = 0; sz < P4EST_HALF; ++sz) {
     quad = side_hanging->is.hanging.quad[sz];
-    p4est_locidx_t quadid = side_hanging->is.hanging.quadid[sz];
 
     // Compute the corner that is on the centre of the parent face
     int cid = p4est_quadrant_child_id(quad);
     int cfc = p4est_corner_face_corners[cid][face];
     int c = p4est_face_corners[face][cfc ^ (P4EST_HALF - 1)];
 
-    if (side_hanging->is.hanging.is_ghost[sz]) {
-      p4est_simplex_push_sharer(d,
-          quadid,
-          quad->p.piggy3.local_num,
-          NODE_TYPE_CORNER + c,
-          cf);
-    } else {
-      elem_node = p4est_element_node_get(d, side_hanging->treeid, quadid);
-      elem_node->corner_nodes[c] = cf;
-    }
+    p4est_simplex_record_node(d,
+        side_hanging->treeid,
+        side_hanging->is.hanging.quadid[sz],
+        side_hanging->is.hanging.is_ghost[sz],
+        NODE_TYPE_CORNER + c,
+        cf);
   }
 }
 
@@ -374,8 +385,8 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
   p8est_iter_edge_side_t *side, *side_hanging, *side_full;
   element_node_t *elem_node;
 
-  p4est_topidx_t treeid;
-  p4est_locidx_t quadid;
+  // p4est_topidx_t treeid;
+  // p4est_locidx_t quadid;
   p4est_quadrant_t *quad;
 
   double abc[3];
@@ -447,29 +458,30 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
   for (zz = 0; zz < info->sides.elem_count; ++zz) {
     side = sc_array_index(&info->sides, zz);
     edge = side->edge;
-    treeid = side->treeid;
+    // treeid = side->treeid;
 
     if (!side->is_hanging) {
       quad = side->is.full.quad;
-      quadid = side->is.full.quadid;
+      // quadid = side->is.full.quadid;
 
-      if (side->is.full.is_ghost) {
-        p4est_simplex_push_sharer(d,
-            quadid,                   // ghostid
-            quad->p.piggy3.local_num,
-            NODE_TYPE_EDGE + side->edge,
-            ce);
-      }
-      else {
-        elem_node = p4est_element_node_get(d, side->treeid, quadid);
-        elem_node->edge_nodes[side->edge] = ce;
-      }
+      p4est_simplex_record_node(d,
+          side->treeid,
+          side->is.full.quadid,
+          side->is.full.is_ghost,
+          NODE_TYPE_EDGE + side->edge,
+          ce);
 
       // For each face adjacent to a hanging edge, we also add a face node
       for (efz = 0; efz < 2; ++efz) {
         face = p8est_edge_faces[edge][efz];
 
-        if (elem_node->face_nodes[face] >= 0)
+        int8_t is_recorded;
+        is_recorded = p4est_simplex_is_node_recorded(d,
+          side->treeid,
+          side->is.full.quadid,
+          NODE_TYPE_FACE + face);
+
+        if (is_recorded)
             continue;
 
         cf = face_nodes[ side->faces[efz] ];
@@ -481,47 +493,35 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
         if (cf == -2) {
           // Add face node
           p4est_quad_face_center_coords(quad, face, abc);
-          cf = p4est_simplex_push_node(d, treeid, abc, owner);
+          cf = p4est_simplex_push_node(d, side->treeid, abc, owner);
           face_nodes[side->faces[efz]] = cf;
-          // printf("[%d] GA %d %d %d\n", d->mpirank, efz, side->faces[efz], face_nodes[ side->faces[efz] ]);
         }
-        else if (cf < 0)
-        {
+        else if (cf < 0) {
           continue;
         }
 
-        if (side->is.full.is_ghost) {
-          p4est_simplex_push_sharer(d,
-              quadid,                   // ghostid
-              quad->p.piggy3.local_num,
-              NODE_TYPE_FACE + face,
-              cf);
-        }
-        else {
-          elem_node->face_nodes[face] = cf;
-        }
+        p4est_simplex_record_node(d,
+            side->treeid,
+            side->is.full.quadid,
+            side->is.full.is_ghost,
+            NODE_TYPE_FACE + face,
+            cf);
 
       }
     } else {
       for (sz = 0; sz < 2; ++sz) {
         quad = side->is.hanging.quad[sz];
-        quadid = side->is.hanging.quadid[sz];
 
         int cid = p4est_quadrant_child_id(quad);
         int cfc = p8est_corner_edge_corners[cid][edge];
         int c = p8est_edge_corners[edge][cfc ^ 1];
 
-        if (side->is.hanging.is_ghost[sz]) {
-          p4est_simplex_push_sharer(d,
-              quadid,
-              quad->p.piggy3.local_num,
-              NODE_TYPE_CORNER + c,
-              ce);
-        }
-        else {
-          elem_node = p4est_element_node_get(d, side->treeid, quadid);
-          elem_node->corner_nodes[c] = ce;
-        }
+        p4est_simplex_record_node(d,
+            side->treeid,
+            side->is.hanging.quadid[sz],
+            side->is.hanging.is_ghost[sz],
+            NODE_TYPE_CORNER + c,
+            ce);
       }
     }
   }
@@ -537,7 +537,6 @@ iter_corner(p4est_iter_corner_info_t *info, void *user_data)
 
   p4est_iter_corner_side_t *side;
 
-  element_node_t *elem_node;
   p4est_locidx_t cc;
   size_t zz;
   int owner, ghost_owner;
@@ -569,18 +568,12 @@ iter_corner(p4est_iter_corner_info_t *info, void *user_data)
       cc = p4est_simplex_push_node(d, side->treeid, abc, owner);
     }
 
-    if (side->is_ghost) {
-      p4est_simplex_push_sharer(d,
-          side->quadid,
-          side->quad->p.piggy3.local_num,
-          NODE_TYPE_CORNER + side->corner,
-          cc);
-    }
-    else
-    {
-      elem_node = p4est_element_node_get(d, side->treeid, side->quadid);
-      elem_node->corner_nodes[side->corner] = cc;
-    }
+    p4est_simplex_record_node(d,
+        side->treeid,
+        side->quadid,
+        side->is_ghost,
+        NODE_TYPE_CORNER + side->corner,
+        cc);
   }
 }
 
