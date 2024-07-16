@@ -15,7 +15,7 @@
 
 // Define the p4est_simplex_mesh_t structure
 typedef struct {
-  
+
   union {
     struct {
       // lnode
@@ -36,9 +36,9 @@ typedef struct {
     p4est_lnodes_t lnodes;
   };
 
-    sc_array_t *vertices;   // Array of vertices, each vertex is 3 doubles (x, y, z)
-    sc_array_t *simplicies; // Array of simplices, each simplex is 4 p4est_locidx_t
-} 
+  sc_array_t *vertices;   // Array of vertices, each vertex is 3 doubles (x, y, z)
+  sc_array_t *simplicies; // Array of simplices, each simplex is 4 p4est_locidx_t
+}
 p4est_simplex_mesh_t;
 
 p4est_simplex_mesh_t *
@@ -53,18 +53,18 @@ void
 p4est_simplex_mesh_destroy(
     p4est_simplex_mesh_t *smesh);
 
-void 
+void
 p4est_quad_corner_coords(
     p4est_quadrant_t *quad,
     int face,
     double abc[3]);
 
-void 
+void
 p4est_quad_center_coords(
     p4est_quadrant_t *quad,
     double abc[3]);
 
-void 
+void
 p4est_quad_face_center_coords(
     p4est_quadrant_t *quad,
     int face,

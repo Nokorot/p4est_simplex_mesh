@@ -10,7 +10,7 @@
 #include "utils.c"
 
 #ifdef VIM_LS
-#include <p4est_to_p8est.h>
+// #include <p4est_to_p8est.h>
 #define P4EST_SIMPLEX_DEBUG
 #endif
 
@@ -97,8 +97,6 @@ typedef struct {
 }
 shared_node_comm_data_t;
 
-
-
 element_node_t *
 p4est_element_node_get(
     p4est_simplex_nodes_data_t *d,
@@ -106,6 +104,7 @@ p4est_element_node_get(
     p4est_locidx_t quadid);
 
 
+// Append a vertex with tree (%ref treeid) local coordinates %ref abc
 p4est_locidx_t
 p4est_simplex_push_node(
     p4est_simplex_nodes_data_t *d,
@@ -283,14 +282,22 @@ iter_volume(p4est_iter_volume_info_t *info, void *user_data)
   p4est_locidx_t cc;
 
   d = user_data;
-  elem_node = p4est_element_node_get(d, info->treeid, info->quadid);
+  // elem_node = p4est_element_node_get(d, info->treeid, info->quadid);
 
   // Add the quad centre node
   p4est_quad_center_coords(info->quad, abc);
 
   owner = d->mpirank;
   cc = p4est_simplex_push_node(d, info->treeid, abc, owner);
-  elem_node->volume_node = cc;
+
+  p4est_simplex_record_node(d,
+      info->treeid,
+      info->quadid,
+      0,
+      NODE_TYPE_VOLUME,
+      cc);
+
+  // elem_node->volume_node = cc;
 }
 
 void
@@ -383,7 +390,6 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
   p4est_simplex_nodes_data_t *d;
 
   p8est_iter_edge_side_t *side, *side_hanging, *side_full;
-  element_node_t *elem_node;
 
   // p4est_topidx_t treeid;
   // p4est_locidx_t quadid;
@@ -781,10 +787,9 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
 
 
 #ifdef P4EST_SIMPLEX_DEBUG
-        printf("[%d] SA %2d -> %2d -> %2d, %2d,    (%.4f, %.4f, %.4f)\n", d->mpirank,
+        printf("[%d] SA %2d -> %2d -> %2d,    (%.4f, %.4f, %.4f)\n", d->mpirank,
             cc,
             snode->node_index,
-            snode->remote_local_number,
             snode->vnode_offset,
             vx[0], vx[1], vx[2]
             );
@@ -1268,6 +1273,7 @@ p4est_simplex_mesh_destroy(
 }
 
 
+// Some utility functions for computing the coordinates of the nodes
 
 void
 p4est_quad_center_coords(
@@ -1454,4 +1460,3 @@ void p4est_simplex_mesh_write_vtk_file(const char *filename, p4est_simplex_mesh_
 
     fclose(file);
 }
-
