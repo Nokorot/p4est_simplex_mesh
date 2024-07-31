@@ -10,7 +10,7 @@
 #include "utils.c"
 
 #ifdef VIM_LS
-// #include <p4est_to_p8est.h>
+#include <p4est_to_p8est.h>
 #define P4EST_SIMPLEX_DEBUG
 #endif
 
@@ -50,6 +50,31 @@ typedef struct {
 }
 element_node_t;
 
+#define SNODES_VNODES P4EST_DIM_POW(3)
+
+/* cube center */
+static const int n_center = 0;
+
+#ifdef P4_TO_P8
+/* face midpoints  */
+static const int n_face[6] = { 1, 2, 3, 5, 6 };
+
+/* edge midpoints  */
+static const int n_edge[12] = {  7,  8,  9, 10,
+                                11, 12, 13, 14,
+                                15, 16, 17, 18 };
+
+/* cube corners */
+static const int n_corner[8] = { 19, 20, 21, 22,
+                                 23, 24, 25, 26 };
+#else
+/* face midpoints  */
+static const int n_face[4] = { 0, 1, 2, 3 };
+
+/* cube corners */
+static const int n_corner[4] = { 0, 1, 2, 3 };
+#endif
+
 typedef enum {
   NODE_TYPE_VOLUME = 0,
   NODE_TYPE_FACE   = 1,
@@ -60,29 +85,57 @@ typedef enum {
   NODE_TYPE_CORNER = 1 + P4EST_FACES,
 #endif
 }
-p4est_simplex_element_node_type_t;
+snode_connect_type_t;
+
 
 typedef struct
 {
   sc_MPI_Comm mpicomm;
   int mpirank, mpisize;
+  int *ghost_rank;
+  uint8_t *chilev;
 
-  p4est_t *p4est;
-  p4est_ghost_t *ghost;
-  p4est_geometry_t *geom;
+
+  p4est_locidx_t lenum;              // Element number
+  p4est_locidx_t num_owned;
+  p4est_locidx_t num_owned_shared;  /**< Nodes we both own and share */
+  p4est_locidx_t num_shared;        /**< Nodes we share, owned or not */
+
+
+  sc_array_t construct;
+  p4est_locidx_t *element_nodes;
+
+  // element configuration might be useful
+
 
   sc_array_t *tree_offsets;
-
   sc_array_t *global_owned_count;
   sc_array_t *owners;
 
   sc_array_t **shared_element_nodes;
 
-
-  sc_array_t *element_nodes;
+  sc_array_t *sa_element_nodes;
   sc_array_t *vertices;
+
+  p4est_t *p4est;
+  p4est_ghost_t *ghost;
+  p4est_geometry_t *geom;
 }
-p4est_simplex_nodes_data_t;
+snodes_meta_t;
+
+
+typedef struct snodes_contr {
+  int nodene;           /**< Relative to element. */
+  int rank;             /**< The referring process. */
+  p4est_locidx_t le;    /**< Element/ghost number. */
+} snodes_contr_t;
+
+typedef struct snodes_cnode {
+  p4est_locidx_t runid;         /**< Running count of node. */
+  snodes_contr_t *owner;         /**< Codimension of node. */
+  // snode_connect_type_t bcon;    /**< Owning contributor. */
+  sc_array_t contr;             /**< Contributing processes. */
+} snodes_cnode_t;
 
 
 typedef struct {
@@ -99,7 +152,7 @@ shared_node_comm_data_t;
 
 element_node_t *
 p4est_element_node_get(
-    p4est_simplex_nodes_data_t *d,
+    snodes_meta_t *d,
     p4est_topidx_t treeid,
     p4est_locidx_t quadid);
 
@@ -107,7 +160,7 @@ p4est_element_node_get(
 // Append a vertex with tree (%ref treeid) local coordinates %ref abc
 p4est_locidx_t
 p4est_simplex_push_node(
-    p4est_simplex_nodes_data_t *d,
+    snodes_meta_t *d,
     p4est_topidx_t treeid,
     double abc[3],
     int owner);
@@ -136,14 +189,14 @@ iter_corner(p4est_iter_corner_info_t *info, void *user_data);
 
 
 void
-p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d);
+p4est_snode_new(snodes_meta_t *d);
 
 
 // Implementations
 
 element_node_t *
 p4est_element_node_get(
-    p4est_simplex_nodes_data_t *d,
+    snodes_meta_t *d,
     p4est_topidx_t treeid,
     p4est_locidx_t quadid
     )
@@ -153,12 +206,12 @@ p4est_element_node_get(
   toff = sc_array_index(d->tree_offsets, treeid);
   elemid = *toff + quadid;
 
-  return sc_array_index(d->element_nodes, elemid);
+  return sc_array_index(d->sa_element_nodes, elemid);
 }
 
 p4est_locidx_t
 p4est_simplex_push_node(
-    p4est_simplex_nodes_data_t *d,
+    snodes_meta_t *d,
     p4est_topidx_t treeid,
     double abc[3],
     int owner)
@@ -211,7 +264,7 @@ shared_node_t;
 
 void
 p4est_simplex_record_node (
-    p4est_simplex_nodes_data_t *d,
+    snodes_meta_t *d,
     p4est_topidx_t treeid,
     p4est_locidx_t quadid,
     int8_t is_ghost,
@@ -257,7 +310,7 @@ p4est_simplex_record_node (
 
 int8_t
 p4est_simplex_is_node_recorded (
-    p4est_simplex_nodes_data_t *d,
+    snodes_meta_t *d,
     p4est_topidx_t treeid,
     p4est_locidx_t quadid,
     int8_t element_vnode_offset)
@@ -265,45 +318,192 @@ p4est_simplex_is_node_recorded (
   p4est_locidx_t *elem_node, *toff;
 
   toff = sc_array_index(d->tree_offsets, treeid);
-  elem_node =  sc_array_index(d->element_nodes, *toff + quadid);
+  elem_node =  sc_array_index(d->sa_element_nodes, *toff + quadid);
 
   return 0 <= elem_node[element_vnode_offset];
 }
 
+
+void
+node_register(
+    snodes_meta_t *me, p4est_locidx_t *lni,
+    int rank, p4est_locidx_t le, int nodene
+    )
+{
+  p4est_locidx_t lnis;
+  snodes_cnode_t *cnode;
+  snodes_contr_t *contr;
+  int owner_rank;
+  size_t siz, zz;
+
+  /* basic checks */
+  P4EST_ASSERT (me != NULL);
+  // P4EST_ASSERT (me->tm != NULL);
+
+  /* a new node is to be created or an existing one is passed in */
+  if (lni == NULL) {
+    lnis = -1;
+    lni = &lnis;
+  }
+  P4EST_ASSERT (-1 <= *lni &&
+                *lni < (p4est_locidx_t) me->construct.elem_count);
+
+  /* abbreviate local rank */
+  P4EST_ASSERT (rank >= -1 && rank != me->mpirank);
+  if (rank == -1) {
+    rank = me->mpirank;
+  }
+
+  P4EST_ASSERT (0 <= rank && rank < me->mpisize);
+
+  /* check remaining arguments */
+  P4EST_ASSERT (0 <= le && le < (p4est_locidx_t)
+                (me->p4est->global_first_quadrant[rank + 1] -
+                 me->p4est->global_first_quadrant[rank]));
+  P4EST_ASSERT (0 <= nodene && nodene < SNODES_VNODES);
+
+  if (*lni == -1) {
+    /* create a new node with one instance */
+    *lni = (p4est_locidx_t) me->construct.elem_count;
+    cnode = (snodes_cnode_t *) sc_array_push (&me->construct);
+    cnode->runid = *lni;
+    // cnode->bcon = bcon;
+    cnode->owner = NULL;
+    sc_array_init (&cnode->contr, sizeof (snodes_contr_t));
+  }
+  else {
+    /* create a new instance of an existing node */
+    cnode = (snodes_cnode_t *) sc_array_index (&me->construct, (size_t) *lni);
+    P4EST_ASSERT (cnode->runid == *lni);
+    // P4EST_ASSERT (cnode->bcon == bcon);
+    P4EST_ASSERT (cnode->contr.elem_size == sizeof (tnodes_contr_t));
+    P4EST_ASSERT (cnode->contr.elem_count > 0);
+    P4EST_ASSERT (cnode->owner != NULL);
+    // TODO: check_node (me, *lni);
+  }
+
+  /* assign node to the local element position */
+  if (rank == me->mpirank) {
+    P4EST_ASSERT (ln->element_nodes[le * ln->vnodes + nodene] == -1);
+    me->element_nodes[le * SNODES_VNODES + nodene] = *lni;
+  }
+
+  /* iterate through instances to find matching process */
+  siz = cnode->contr.elem_count;
+  P4EST_ASSERT (siz == 0 || cnode->owner != NULL);
+  for (zz = 0; zz < siz; ++zz) {
+    contr = (snodes_contr_t *) sc_array_index (&cnode->contr, zz);
+    P4EST_ASSERT (cnode->owner->rank <= contr->rank);
+    if (contr->rank == rank) {
+      /* rank is found and we remember the smallest node position */
+      if (le < contr->le || (le == contr->le && nodene < contr->nodene)) {
+        contr->nodene = nodene;
+        contr->le = le;
+      }
+      // TODO: check_node (me, *lni);
+      return;
+    }
+  }
+
+  /* add new node process to the list for this node */
+  owner_rank = cnode->owner == NULL ? -1 : cnode->owner->rank;
+  contr = (snodes_contr_t *) sc_array_push (&cnode->contr);
+  contr->nodene = nodene;
+  contr->rank = rank;
+  contr->le = le;
+  if (cnode->owner == NULL || rank <= owner_rank) {
+    /* the array was empty before or we know to set a new owner */
+    P4EST_ASSERT (rank != owner_rank);
+    cnode->owner = contr;
+  }
+  else {
+    // TODO: Consider using an offset instead
+    /* pushing to the array has invalidated the previous owner pointer */
+    cnode->owner = (snodes_contr_t *) sc_array_index (&cnode->contr, 0);
+    siz = cnode->contr.elem_count;
+    for (zz = 1; zz < siz - 1; ++zz) {
+      contr = (snodes_contr_t *) sc_array_index (&cnode->contr, zz);
+      if (contr->rank < cnode->owner->rank) {
+        cnode->owner = contr;
+      }
+    }
+  }
+}
+
+void
+node_lregister(
+    snodes_meta_t *me, p4est_locidx_t *lni,
+    p4est_locidx_t le, int nodene
+    )
+{
+  node_register(me, lni, -1, le, nodene);
+}
+
+void
+node_gregister(
+    snodes_meta_t *me, p4est_locidx_t *lni,
+    p4est_locidx_t ghostid, int nodene
+    )
+{
+  p4est_quadrant_t *gquad;
+
+  P4EST_ASSERT (me != NULL);
+  // P4EST_ASSERT (me->sm != NULL);
+  P4EST_ASSERT (0 <= nodene && nodene < SNODES_VNODES);
+
+  if (me->ghost != NULL) {
+    P4EST_ASSERT (me->ghost_rank != NULL);
+    P4EST_ASSERT (0 <= ghostid &&
+                  ghostid < (p4est_locidx_t) me->ghost->ghosts.elem_count);
+
+    /* extract remote element number from ghost quadrant */
+    gquad = (p4est_quadrant_t *) sc_array_index (&me->ghost->ghosts, ghostid);
+    node_register (me, lni, me->ghost_rank[ghostid],
+                   gquad->p.piggy3.local_num, nodene);
+  }
+}
+
+
 // ITERATORS
 void
-iter_volume(p4est_iter_volume_info_t *info, void *user_data)
+iter_volume(p4est_iter_volume_info_t *vi, void *user_data)
 {
-  p4est_simplex_nodes_data_t *d;
-  element_node_t *elem_node;
+  snodes_meta_t *me = (snodes_meta_t *) user_data;
+
+  p4est_locidx_t le;
+  p4est_locidx_t childid;
+  int8_t level;
+
 
   double abc[3];
   int owner;
   p4est_locidx_t cc;
 
-  d = user_data;
-  // elem_node = p4est_element_node_get(d, info->treeid, info->quadid);
-
   // Add the quad centre node
-  p4est_quad_center_coords(info->quad, abc);
+  p4est_quad_center_coords(vi->quad, abc);
 
-  owner = d->mpirank;
-  cc = p4est_simplex_push_node(d, info->treeid, abc, owner);
-
-  p4est_simplex_record_node(d,
-      info->treeid,
-      info->quadid,
+  owner = me->mpirank;
+  cc = p4est_simplex_push_node(me, vi->treeid, abc, owner);
+  p4est_simplex_record_node(me,
+      vi->treeid,
+      vi->quadid,
       0,
       NODE_TYPE_VOLUME,
       cc);
 
-  // elem_node->volume_node = cc;
+
+  le = me->lenum++;
+  level = vi->quad->level;
+  childid = p4est_quadrant_child_id (vi->quad);
+  me->chilev[le] = (((uint8_t) level) << 3) | ((uint8_t) childid);
+
+  node_lregister(me, NULL, le, n_center);
 }
 
 void
 iter_face(p4est_iter_face_info_t *info, void *user_data)
 {
-  p4est_simplex_nodes_data_t *d;
+  snodes_meta_t *me = (snodes_meta_t *) user_data;
 
   p4est_iter_face_side_t *side, *side_full, *side_hanging;
   p4est_quadrant_t *quad;
@@ -315,8 +515,6 @@ iter_face(p4est_iter_face_info_t *info, void *user_data)
   p4est_locidx_t cf;
   size_t sz, zz;
   int face;
-
-  d = user_data;
 
   side_hanging = NULL;
   for (zz = 0; zz < info->sides.elem_count; ++zz) {
@@ -332,7 +530,7 @@ iter_face(p4est_iter_face_info_t *info, void *user_data)
     return;
 
   if (!side_full->is.full.is_ghost) {
-    elem_node = p4est_element_node_get(d,
+    elem_node = p4est_element_node_get(me,
         side_full->treeid, side_full->is.full.quadid);
 
     cf = elem_node->face_nodes[side_full->face];
@@ -348,15 +546,15 @@ iter_face(p4est_iter_face_info_t *info, void *user_data)
     // The full_side is always the owner
     if (side_full->is.full.is_ghost) {
       int ghostid = side_full->is.full.quadid;
-      owner = p4est_find_ghost_owner(d->p4est, d->ghost, ghostid);
+      owner = p4est_find_ghost_owner(me->p4est, me->ghost, ghostid);
     } else {
-      owner = d->mpirank;
+      owner = me->mpirank;
     }
 
-    cf = p4est_simplex_push_node(d, side_full->treeid, abc, owner);
+    cf = p4est_simplex_push_node(me, side_full->treeid, abc, owner);
   }
 
-  p4est_simplex_record_node(d,
+  p4est_simplex_record_node(me,
       side_full->treeid,
       side_full->is.full.quadid,
       side_full->is.full.is_ghost,
@@ -374,7 +572,7 @@ iter_face(p4est_iter_face_info_t *info, void *user_data)
     int cfc = p4est_corner_face_corners[cid][face];
     int c = p4est_face_corners[face][cfc ^ (P4EST_HALF - 1)];
 
-    p4est_simplex_record_node(d,
+    p4est_simplex_record_node(me,
         side_hanging->treeid,
         side_hanging->is.hanging.quadid[sz],
         side_hanging->is.hanging.is_ghost[sz],
@@ -387,7 +585,7 @@ iter_face(p4est_iter_face_info_t *info, void *user_data)
 void
 iter_edge(p8est_iter_edge_info_t *info, void *user_data)
 {
-  p4est_simplex_nodes_data_t *d;
+  snodes_meta_t *me = (snodes_meta_t *) user_data;
 
   p8est_iter_edge_side_t *side, *side_hanging, *side_full;
 
@@ -402,8 +600,6 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
   size_t sz, zz, efz;
   int face, edge;
   int faces_count;
-
-  d = user_data;
 
   // We determine the number of faces
   faces_count = 0;
@@ -436,9 +632,9 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
       // Only a full side may be the owner
       // TODO:   I think the hanging side would be a better owner
       owner = !(side->is.full.is_ghost)
-                  ? d->mpirank
+                  ? me->mpirank
                   : p4est_find_ghost_owner(
-                      d->p4est, d->ghost, side->is.full.quadid);
+                      me->p4est, me->ghost, side->is.full.quadid);
 
       if (!side->is.full.is_ghost) {
         face_nodes[side->faces[0]] = -2;
@@ -458,7 +654,7 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
   // Add the edge node
   quad = side_full->is.full.quad;
   p8est_quad_edge_center_coords(quad, side_full->edge, abc);
-  ce = p4est_simplex_push_node(d, side_full->treeid, abc, owner);
+  ce = p4est_simplex_push_node(me, side_full->treeid, abc, owner);
 
   // We record the index in the element_nodes for each side
   for (zz = 0; zz < info->sides.elem_count; ++zz) {
@@ -470,7 +666,7 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
       quad = side->is.full.quad;
       // quadid = side->is.full.quadid;
 
-      p4est_simplex_record_node(d,
+      p4est_simplex_record_node(me,
           side->treeid,
           side->is.full.quadid,
           side->is.full.is_ghost,
@@ -482,7 +678,7 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
         face = p8est_edge_faces[edge][efz];
 
         int8_t is_recorded;
-        is_recorded = p4est_simplex_is_node_recorded(d,
+        is_recorded = p4est_simplex_is_node_recorded(me,
           side->treeid,
           side->is.full.quadid,
           NODE_TYPE_FACE + face);
@@ -499,14 +695,14 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
         if (cf == -2) {
           // Add face node
           p4est_quad_face_center_coords(quad, face, abc);
-          cf = p4est_simplex_push_node(d, side->treeid, abc, owner);
+          cf = p4est_simplex_push_node(me, side->treeid, abc, owner);
           face_nodes[side->faces[efz]] = cf;
         }
         else if (cf < 0) {
           continue;
         }
 
-        p4est_simplex_record_node(d,
+        p4est_simplex_record_node(me,
             side->treeid,
             side->is.full.quadid,
             side->is.full.is_ghost,
@@ -522,7 +718,7 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
         int cfc = p8est_corner_edge_corners[cid][edge];
         int c = p8est_edge_corners[edge][cfc ^ 1];
 
-        p4est_simplex_record_node(d,
+        p4est_simplex_record_node(me,
             side->treeid,
             side->is.hanging.quadid[sz],
             side->is.hanging.is_ghost[sz],
@@ -539,7 +735,7 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
 void
 iter_corner(p4est_iter_corner_info_t *info, void *user_data)
 {
-  p4est_simplex_nodes_data_t *d;
+  snodes_meta_t *me = (snodes_meta_t *) user_data;
 
   p4est_iter_corner_side_t *side;
 
@@ -547,9 +743,7 @@ iter_corner(p4est_iter_corner_info_t *info, void *user_data)
   size_t zz;
   int owner, ghost_owner;
 
-  d = user_data;
-
-  owner = d->mpirank;
+  owner = me->mpirank;
   for (zz = 0; zz < info->sides.elem_count; ++zz) {
     side = sc_array_index(&info->sides, zz);
 
@@ -557,7 +751,7 @@ iter_corner(p4est_iter_corner_info_t *info, void *user_data)
       continue;
 
     // The owner of the side with the smallest rank is the owner of the node
-    ghost_owner = p4est_find_ghost_owner(d->p4est, d->ghost, side->quadid);
+    ghost_owner = p4est_find_ghost_owner(me->p4est, me->ghost, side->quadid);
     if (ghost_owner < owner)
       owner = ghost_owner;
   }
@@ -571,10 +765,10 @@ iter_corner(p4est_iter_corner_info_t *info, void *user_data)
       // Add the quad corner node
       double abc[3];
       p4est_quad_corner_coords(side->quad, side->corner, abc);
-      cc = p4est_simplex_push_node(d, side->treeid, abc, owner);
+      cc = p4est_simplex_push_node(me, side->treeid, abc, owner);
     }
 
-    p4est_simplex_record_node(d,
+    p4est_simplex_record_node(me,
         side->treeid,
         side->quadid,
         side->is_ghost,
@@ -584,56 +778,91 @@ iter_corner(p4est_iter_corner_info_t *info, void *user_data)
 }
 
 void
-p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
+// p4est_snodes_t *
+p4est_snode_new(
+    snodes_meta_t *me)
 {
   p4est_t *p4est;
   p4est_ghost_t *ghost;
   p4est_tree_t *tree;
 
-  p4est_locidx_t num_local_elements;
+  p4est_locidx_t lel;
   size_t tz, t_off;
 
-  p4est = d->p4est;
-  ghost = d->ghost;
+  p4est = me->p4est;
+  ghost = me->ghost;
 
-  d->mpicomm = sc_MPI_COMM_WORLD;
-  d->mpirank = p4est->mpirank;
-  d->mpisize = p4est->mpisize;
+  // memset (me, 0, sizeof (snodes_meta_t));
+  //
+  lel = p4est->local_num_quadrants;
+  me->chilev = P4EST_ALLOC_ZERO(uint8_t, lel);
+  memset (me->element_nodes, -1, SNODES_VNODES * sizeof (p4est_locidx_t));
 
+  me->mpicomm = sc_MPI_COMM_WORLD;
+  me->mpirank = p4est->mpirank;
+  me->mpisize = p4est->mpisize;
+
+  p4est_locidx_t lg, ng;
+  int q;
+  if ((me->ghost = ghost) != NULL) {
+    P4EST_ASSERT (ghost->proc_offsets[0] == 0);
+    P4EST_ASSERT (ghost->proc_offsets[me->mpisize] ==
+                  (p4est_locidx_t) ghost->ghosts.elem_count);
+    me->ghost_rank = P4EST_ALLOC (int, ghost->ghosts.elem_count);
+    lg = 0;
+    for (q = 0; q < me->mpisize; ++q) {
+      ng = ghost->proc_offsets[q + 1];
+      for (; lg < ng; ++lg) {
+        me->ghost_rank[lg] = q;
+      }
+    }
+    P4EST_ASSERT (lg == (p4est_locidx_t) ghost->ghosts.elem_count);
+// #ifdef P4EST_ENABLE_MPI
+//     me->proc_peer = P4EST_ALLOC_ZERO (int, s);
+//     sc_array_init (&me->sortp, sizeof (tnodes_peer_t *));
+//     sc_array_init (&me->peers, sizeof (tnodes_peer_t));
+//     sc_array_init (&me->pereq, sizeof (sc_MPI_Request));
+// #endif
+  }
+
+
+
+  /** Deprecated code **/
   // We compute the tree offsets in the local elements
   t_off = 0;
-  d->tree_offsets = sc_array_new_count(sizeof(size_t), p4est->trees->elem_count + 1);
+  me->tree_offsets = sc_array_new_count(sizeof(size_t), p4est->trees->elem_count + 1);
   for (tz = 0; tz < p4est->trees->elem_count; ++tz) {
-    *((size_t *) sc_array_index(d->tree_offsets, tz)) = t_off;
+    *((size_t *) sc_array_index(me->tree_offsets, tz)) = t_off;
     tree = sc_array_index(p4est->trees, tz);
     t_off += tree->quadrants.elem_count;
   }
 
-  d->vertices     = sc_array_new(3*sizeof(double));
-  d->owners       = sc_array_new(sizeof(int));
-  d->global_owned_count  = sc_array_new_count(sizeof(size_t), p4est->mpisize);
+  me->vertices     = sc_array_new(3*sizeof(double));
+  me->owners       = sc_array_new(sizeof(int));
+  me->global_owned_count  = sc_array_new_count(sizeof(size_t), p4est->mpisize);
 
-  d->shared_element_nodes = P4EST_ALLOC_ZERO(sc_array_t *, d->mpisize);
+  me->shared_element_nodes = P4EST_ALLOC_ZERO(sc_array_t *, me->mpisize);
 
   for (size_t zz=0; zz < p4est->mpisize; ++zz) {
-    size_t *owned = sc_array_index(d->global_owned_count, zz);
+    size_t *owned = sc_array_index(me->global_owned_count, zz);
     *owned = 0;
   }
 
-  num_local_elements = p4est->local_num_quadrants;
-  d->element_nodes = sc_array_new_count(sizeof(element_node_t),
-                                        num_local_elements);
-
+  me->sa_element_nodes = sc_array_new_count(sizeof(element_node_t), lel);
   // Initialize all nodes with -1
-  memset(d->element_nodes->array, 0xff, num_local_elements*sizeof(element_node_t));
+  memset(me->sa_element_nodes->array, 0xff, lel*sizeof(element_node_t));
+
+  /** End of deprecated code ***/
+
 
   // Find all local nodes
-  p4est_iterate(p4est, ghost, d,
+  p4est_iterate(p4est, ghost, me,
       iter_volume, iter_face,
 #ifdef P4_TO_P8
       iter_edge,
 #endif
      iter_corner);
+
 
 
   // *** We sort the local nodes according to process rank, with the
@@ -653,61 +882,61 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
   p4est_locidx_t *elem_nodes, cc;
   sc_array_t *new_vertices;
 
-  num_local_elements = p4est->local_num_quadrants;
+  lel = p4est->local_num_quadrants;
 
   // We begin by computing where to put the nodes owned
   // by the respective processes
 
-  proc_offsets = P4EST_ALLOC(p4est_locidx_t, d->mpisize + 1);
+  proc_offsets = P4EST_ALLOC(p4est_locidx_t, me->mpisize + 1);
 
-  owned = sc_array_index(d->global_owned_count, d->mpirank);
+  owned = sc_array_index(me->global_owned_count, me->mpirank);
   offset = *owned;
 
-  for (int zz=0; zz < d->mpisize; ++zz) {
-    if (zz == d->mpirank) { // We put all locally owned nodes first
+  for (int zz=0; zz < me->mpisize; ++zz) {
+    if (zz == me->mpirank) { // We put all locally owned nodes first
       proc_offsets[zz] = 0;
       continue;
     }
 
     proc_offsets[zz] = offset;
 
-    owned = sc_array_index(d->global_owned_count, zz);
+    owned = sc_array_index(me->global_owned_count, zz);
     offset += *owned;
   }
 
-  owned = sc_array_index(d->global_owned_count, d->mpirank);
+  owned = sc_array_index(me->global_owned_count, me->mpirank);
   num_owned_nodes = *owned;
 
-  num_local_nodes = proc_offsets[d->mpisize] = offset;
+  num_local_nodes = proc_offsets[me->mpisize] = offset;
 
   // Now we move the vertices into the new order and compute
   // the new location for each local node
 
-  proc_node_count = P4EST_ALLOC_ZERO(p4est_locidx_t, d->mpisize);
+  proc_node_count = P4EST_ALLOC_ZERO(p4est_locidx_t, me->mpisize);
   new_local_nodes = P4EST_ALLOC(p4est_locidx_t, num_local_nodes);
   new_vertices = sc_array_new_count(3*sizeof(double), num_local_nodes);
 
   for (zz = 0; zz < num_local_nodes; ++zz) {
-    owner = sc_array_index(d->owners, zz);
+    owner = sc_array_index(me->owners, zz);
 
     new_cc = proc_offsets[*owner] + (proc_node_count[*owner]++);
     new_local_nodes[zz] = new_cc;
 
     memcpy(sc_array_index(new_vertices, new_cc),
-           sc_array_index( d->vertices, zz),
+           sc_array_index( me->vertices, zz),
            3*sizeof(double));
   }
 
   P4EST_FREE(proc_node_count);
 
-  sc_array_destroy(d->vertices);
-  d->vertices = new_vertices;
+  sc_array_destroy(me->vertices);
+  me->vertices = new_vertices;
 
   // Finally we remap the element_nodes to refer to the new node indices
-  vnodes = P4EST_DIM_POW(3); // = sizeof(element_node_t) / sizeof(p4est_locidx_t);
+  vnodes = SNODES_VNODES; // = sizeof(element_node_t) / sizeof(p4est_locidx_t);
 
-  for (elem = 0; elem < num_local_elements; ++elem) {
-    elem_nodes = sc_array_index(d->element_nodes, elem);
+  for (elem = 0; elem < lel; ++elem) {
+    elem_nodes = sc_array_index(me->sa_element_nodes, elem);
 
     for (cc_off = 0; cc_off < vnodes; ++cc_off) {
       cc = elem_nodes[cc_off];
@@ -716,10 +945,10 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
   }
 
 
-  int owned_count = *( (int *) sc_array_index(d->global_owned_count, d->mpirank) );
+  int owned_count = *( (int *) sc_array_index(me->global_owned_count, me->mpirank) );
 
-  sc_array_destroy(d->owners);
-  sc_array_destroy(d->global_owned_count);
+  sc_array_destroy(me->owners);
+  sc_array_destroy(me->global_owned_count);
 
 
 // Send node indices
@@ -733,12 +962,12 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
   int i, proc;
   double *vx;
 
-  send_buf = P4EST_ALLOC (sc_array_t, d->mpisize);
+  send_buf = P4EST_ALLOC (sc_array_t, me->mpisize);
 
-  printf("[%d] Num local nodes %ld\n", p4est->mpirank, d->vertices->elem_count);
+  printf("[%d] Num local nodes %ld\n", p4est->mpirank, me->vertices->elem_count);
   printf("[%d] Owned count %d\n", p4est->mpirank, owned_count);
 
-  for (i = 0; i < d->mpisize; i++) {
+  for (i = 0; i < me->mpisize; i++) {
     sc_array_init (&(send_buf[i]), sizeof (shared_node_comm_data_t));
   }
 
@@ -748,8 +977,8 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
   total_sent = 0;
 
   shared_node_t *snode;
-  for (proc=0; proc < d->mpisize; ++proc) {
-    if (proc == d->mpirank)
+  for (proc=0; proc < me->mpisize; ++proc) {
+    if (proc == me->mpirank)
       continue;
 
     send = &(send_buf[proc]);
@@ -757,9 +986,9 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
     lp = sc_array_push(send);
     lp->node_count = num_owned_nodes;
 
-    sc_array_t *shared_nodes = d->shared_element_nodes[proc];
+    sc_array_t *shared_nodes = me->shared_element_nodes[proc];
     if (shared_nodes) {
-      printf("[%d] rr %d\n", d->mpirank, proc);
+      printf("[%d] rr %d\n", me->mpirank, proc);
       for (size_t iz=0; iz<shared_nodes->elem_count; ++iz) {
         snode = sc_array_index(shared_nodes, iz);
 
@@ -768,7 +997,7 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
         cc = snode->node_index;
         snode->node_index = new_local_nodes[cc];
 
-        vx = sc_array_index(d->vertices, snode->node_index);
+        vx = sc_array_index(me->vertices, snode->node_index);
 
         if (snode->node_index < num_owned_nodes) {
           lp = sc_array_push(send);
@@ -787,7 +1016,7 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
 
 
 #ifdef P4EST_SIMPLEX_DEBUG
-        printf("[%d] SA %2d -> %2d -> %2d,    (%.4f, %.4f, %.4f)\n", d->mpirank,
+        printf("[%d] SA %2d -> %2d -> %2d,    (%.4f, %.4f, %.4f)\n", me->mpirank,
             cc,
             snode->node_index,
             snode->vnode_offset,
@@ -821,9 +1050,9 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
 // Receive node indices
 
   p4est_locidx_t *global_owned_count; // , *shared_nodes;
-  global_owned_count = P4EST_ALLOC(p4est_locidx_t, d->mpisize);
+  global_owned_count = P4EST_ALLOC(p4est_locidx_t, me->mpisize);
 
-  global_owned_count[d->mpirank] = owned_count;
+  global_owned_count[me->mpirank] = owned_count;
 
   p4est_gloidx_t *nonlocal_nodes = P4EST_ALLOC(p4est_gloidx_t, num_local_nodes - owned_count);
 
@@ -834,12 +1063,12 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
   int byte_count, elem_count;
   int node_count;
 
-  recv_buf = P4EST_ALLOC (sc_array_t, d->mpisize);
-  for (i = 0; i < d->mpisize; i++) {
+  recv_buf = P4EST_ALLOC (sc_array_t, me->mpisize);
+  for (i = 0; i < me->mpisize; i++) {
     sc_array_init (&(recv_buf[i]), sizeof (shared_node_comm_data_t));
   }
 
-  for (i = 0; i < d->mpisize - 1; i++) {
+  for (i = 0; i < me->mpisize - 1; i++) {
     printf("[%d] Probing\n", p4est->mpirank);
 
     mpiret = sc_MPI_Probe (sc_MPI_ANY_SOURCE, P4EST_COMM_SIMPLEX_PASS,
@@ -861,23 +1090,22 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
     SC_CHECK_MPI (mpiret);
 
 
-
     printf("[%d] Received %d indices from %d\n", p4est->mpirank, elem_count, proc);
 
     lp = sc_array_index(recv, 0);
     global_owned_count[proc] = lp->node_count;
 
-    printf("[%d] R process %d has %d nodes\n", d->mpirank, proc, lp->node_count);
+    printf("[%d] R process %d has %d nodes\n", me->mpirank, proc, lp->node_count);
 
     node_count = 0;
 
-    sc_array_t *shared_nodes = d->shared_element_nodes[proc];
+    sc_array_t *shared_nodes = me->shared_element_nodes[proc];
     if (shared_nodes) {
       p4est_locidx_t next_proc_off = proc_offsets[proc+1]
                                 ? proc_offsets[proc+1]
                                 : proc_offsets[proc+2];
 
-      printf("[%d] Rr[%d, %d] %d\n", d->mpirank,
+      printf("[%d] Rr[%d, %d] %d\n", me->mpirank,
               proc_offsets[proc],
               next_proc_off,
               proc);
@@ -893,7 +1121,7 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
 
           nonlocal_nodes[ snode->node_index - owned_count ] = lp->node_index;
 
-          vx = sc_array_index(d->vertices, snode->node_index);
+          vx = sc_array_index(me->vertices, snode->node_index);
 
 #ifdef P4EST_SIMPLEX_DEBUG
           printf("[%d] RA  %2d, %2d -> %2d,    (%.4f, %.4f, %.4f) -> (%.4f, %.4f, %.4f)\n", p4est->mpirank,
@@ -931,7 +1159,7 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
 
     while (zz > next_proc_off) {
       proc_global_offset += global_owned_count[ proc ];
-      if (++proc == d->mpirank) {
+      if (++proc == me->mpirank) {
         global_offset = proc_global_offset;
         continue;
       }
@@ -949,8 +1177,8 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
     nonlocal_nodes[ zz ] += proc_global_offset;
   }
 
-  for (; proc < d->mpisize; proc++) {
-    if (proc == d->mpirank)
+  for (; proc < me->mpisize; proc++) {
+    if (proc == me->mpirank)
       global_offset = proc_global_offset;
     proc_global_offset += global_owned_count[ proc ];
   }
@@ -963,7 +1191,7 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
 
 
   for (int zz = 0; zz < owned_count; zz++) {
-    vx = sc_array_index(d->vertices, zz);
+    vx = sc_array_index(me->vertices, zz);
 
     printf("[%d] LocNode  %2d, -> %2ld,   (%.4f, %.4f, %.4f)\n", p4est->mpirank,
         zz,
@@ -981,7 +1209,7 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
 
   sc_array_destroy (send_requests);
 
-  for (i = 0; i < d->mpisize; i++) {
+  for (i = 0; i < me->mpisize; i++) {
     sc_array_reset (&(send_buf[i]));
     sc_array_reset (&(recv_buf[i]));
   }
@@ -992,8 +1220,8 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
   P4EST_FREE (proc_offsets);
   P4EST_FREE (new_local_nodes);
 
-  for (int proc=0; proc < d->mpisize; ++proc) {
-    sc_array_t *shared_nodes = d->shared_element_nodes[proc];
+  for (int proc=0; proc < me->mpisize; ++proc) {
+    sc_array_t *shared_nodes = me->shared_element_nodes[proc];
     if (!shared_nodes)
       continue;
 
@@ -1003,7 +1231,7 @@ p4est_new_simplex_mesh_nodes(p4est_simplex_nodes_data_t *d)
 
   P4EST_FREE (global_owned_count);
   P4EST_FREE (nonlocal_nodes);
-  P4EST_FREE (d->shared_element_nodes);
+  P4EST_FREE (me->shared_element_nodes);
 
 
   return;
@@ -1028,7 +1256,7 @@ p4est_new_simplex_mesh(
     p4est_geometry_t *geom,
     p4est_ghost_t *ghost)
 {
-  p4est_simplex_nodes_data_t d;
+  snodes_meta_t d;
   sc_array_t *simplicies;
 
   size_t zz, fi;
@@ -1055,7 +1283,7 @@ p4est_new_simplex_mesh(
   d.ghost = ghost;
   d.geom = geom;
 
-  p4est_new_simplex_mesh_nodes(&d);
+  p4est_snode_new(&d);
   // p4est_simplex_mesh_reoder_nodes(&d);
 
   simplicies = sc_array_new((P4EST_DIM + 1)*sizeof(p4est_locidx_t));
@@ -1074,7 +1302,7 @@ p4est_new_simplex_mesh(
       qid = *quad;
       qid.p.which_tree = t;
 
-      elem_node = sc_array_index(d.element_nodes, elemid);
+      elem_node = sc_array_index(d.sa_element_nodes, elemid);
       cc = elem_node->volume_node;
 
       for (fi = 0; fi < P4EST_FACES; ++fi) {
@@ -1249,7 +1477,7 @@ p4est_new_simplex_mesh(
     } // for (zz = 0..|quadtrees|)
   } // for (t = first-..last-localtrees)
 
-  sc_array_destroy(d.element_nodes);
+  sc_array_destroy(d.sa_element_nodes);
   sc_array_destroy(d.tree_offsets);
 
   p4est_simplex_mesh_t *mesh;
