@@ -13,9 +13,10 @@
 #include <p8est_geometry.h>
 #endif
 
-// Define the p4est_simplex_mesh_t structure
-typedef struct {
 
+// typedef struct ;
+//
+typedef struct p4est_snodes {
   union {
     struct {
       // lnode
@@ -30,22 +31,37 @@ typedef struct {
       int                 degree, vnodes; // Not defined
       p4est_locidx_t      num_local_elements;
       p4est_lnodes_code_t *face_code; //  Not defined
-      p4est_locidx_t     *element_nodes; // Not YET defined
+      p4est_locidx_t      *element_nodes;
       // end lnode
     };
     p4est_lnodes_t lnodes;
   };
 
-  sc_array_t *vertices;   // Array of vertices, each vertex is 3 doubles (x, y, z)
+
+}
+p4est_snodes_t;
+
+
+
+// Define the p4est_simplex_mesh_t structure
+typedef struct {
+  p4est_snodes_t *snodes;
+
+  sc_array_t *coordinates;
+
+  // sc_array_t *vertices;   // Array of vertices, each vertex is 3 doubles (x, y, z)
   sc_array_t *simplicies; // Array of simplices, each simplex is 4 p4est_locidx_t
 }
 p4est_simplex_mesh_t;
+
 
 p4est_simplex_mesh_t *
 p4est_new_simplex_mesh(
     p4est_t *p4est,
     p4est_geometry_t *geometry,
     p4est_ghost_t *ghost);
+
+
 
 
 
