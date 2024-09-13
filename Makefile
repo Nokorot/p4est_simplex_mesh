@@ -2,10 +2,16 @@
 CC=mpicc
 
 CFLAGS=-ggdb -lp4est -lsc -L../local/lib \
-			 -I../local/include -I${MPI_INCLUDE} -I${MPI_LIB} \
-			 -Wl,-rpath="${HOME}/Thisis/local/lib" \
+			 -I../p4est_cb/local/include -I${MPI_INCLUDE} -I${MPI_LIB} \
+			 -Wl,-rpath="${HOME}/Thisis/p4est_cb/local/lib" \
 			 -DP4EST_SIMPLEX_DEBUG \
 			 -DP4EST_ENABLE_DEBUG
+
+# CFLAGS=-ggdb -lp4est -lsc -L../local/lib \
+# 			 -I../local/include -I${MPI_INCLUDE} -I${MPI_LIB} \
+# 			 -Wl,-rpath="${HOME}/Thisis/local/lib" \
+# 			 -DP4EST_SIMPLEX_DEBUG \
+# 			 -DP4EST_ENABLE_DEBUG
 
 .PHONY: alla
 

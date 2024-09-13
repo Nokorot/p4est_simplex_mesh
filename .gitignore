@@ -13,3 +13,7 @@ out
 compile_flags.txt
 *.log
 debug.gdb
+oneoff.utf-8.add
+oneoff.utf-8.add.spl
+out_old
+.session.vim
