@@ -1,4 +1,3 @@
-
 #ifdef VIM_LS
 // #include <p4est_to_p8est.h>
 #endif
@@ -23,8 +22,6 @@
 
 #include "p8est_simplex_mesh.h"
 #endif
-
-
 
 #include "utils.c"
 
@@ -57,7 +54,8 @@ context_t;
 
 /** Refines the p4est, producing hanging-nodes
  */
-static int refine_fn (p4est_t * p4est, p4est_topidx_t which_tree, p4est_quadrant_t *quadrant)
+static int
+refine_fn (p4est_t * p4est, p4est_topidx_t which_tree, p4est_quadrant_t *quadrant)
 {
   context_t *g = (context_t *) p4est->user_pointer;
 
@@ -86,7 +84,7 @@ static int refine_fn (p4est_t * p4est, p4est_topidx_t which_tree, p4est_quadrant
   return 1;
 }
 
-int
+static int
 create_context_from_opts(context_t *g, options_t *opts)
 {
   p4est_t *p4est;
@@ -183,8 +181,6 @@ tnodes_run(context_t *g)
   P4EST_ASSERT(g->p4est);
   P4EST_ASSERT(g->ghost);
 
-  // return;
-
   tnodes = p4est_new_simplex_mesh(
         g->p4est,
         g->geom,
@@ -198,7 +194,6 @@ tnodes_run(context_t *g)
   /* the geometry was passed to the tnodes already, don't use it here */
   cont = p4est_vtk_context_new (g->p4est, filepath);
   SC_CHECK_ABORT (cont != NULL, "Open VTK context");
-  // Supplyuing the geom here does not work for snodes atm
   // p4est_vtk_context_set_geom (cont, g->geom);
   p4est_vtk_context_set_continuous (cont, g->opts->vtk_scale >= 1.0);
 
@@ -219,8 +214,6 @@ tnodes_run(context_t *g)
   p4est_lnodes_destroy (tnodes->lnodes);
   p4est_tnodes_destroy (tnodes);
 }
-
-
 
 int
 main(int argc, char **argv) {
