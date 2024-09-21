@@ -35,7 +35,7 @@ typedef struct
   const char *mshpath;
   const char *outdir;
 
-  int hangine_node_level;
+  double vtk_scale;
 }
 options_t;
 
@@ -190,8 +190,8 @@ tnodes_run(context_t *g)
         g->geom,
         g->ghost);
 
-  sprintf(filepath, "%s/" P4EST_STRING "_snodes_simplices_%dd_%s_%d-%d",
-      g->opts->outdir, P4EST_DIM, g->opts->conn,
+  sprintf(filepath, "%s/" P4EST_STRING "_snodes_simplices_%s_%d-%d",
+      g->opts->outdir, g->opts->conn,
       g->opts->minlevel, g->opts->maxlevel);
 
   /* write VTK output */
@@ -200,11 +200,10 @@ tnodes_run(context_t *g)
   SC_CHECK_ABORT (cont != NULL, "Open VTK context");
   // Supplyuing the geom here does not work for snodes atm
   // p4est_vtk_context_set_geom (cont, g->geom);
-  p4est_vtk_context_set_continuous (cont, 1);
+  p4est_vtk_context_set_continuous (cont, g->opts->vtk_scale >= 1.0);
 
   /* beware: values < 1. cause a lot more mesh nodes */
-  // p4est_vtk_context_set_scale (cont, 0.9);
-  p4est_vtk_context_set_scale (cont, 1.0);
+  p4est_vtk_context_set_scale (cont, g->opts->vtk_scale);
 
   cont = p4est_vtk_write_header_tnodes (cont, tnodes);
   SC_CHECK_ABORT (cont != NULL, "Write tnodes VTK header");
@@ -215,8 +214,6 @@ tnodes_run(context_t *g)
   SC_CHECK_ABORT (cont != NULL, "Write tnodes VTK cells");
   retval = p4est_vtk_write_footer (cont);
   SC_CHECK_ABORT (!retval, "Close VTK context");
-
-
 
   /* free triangle mesh */
   p4est_lnodes_destroy (tnodes->lnodes);
@@ -246,33 +243,18 @@ main(int argc, char **argv) {
   /* Does this really need to be before the parsing? */
   sc_init (g->mpicomm, 1, 1, NULL, SC_LP_DEFAULT);
 
-  /* Initialize default option values */
-  opts->minlevel = 2;
-  opts->maxlevel = 5;
-  opts->conn = "unit";
-  opts->mshpath = NULL;  // Defaults to "{opts->conn}.msh"
-  opts->outdir = "out";
-
   sc_opts = sc_options_new (argv[0]);
   sc_options_add_int (sc_opts, 'l', "minlevel",
-              &opts->minlevel, opts->minlevel, "Lowest level");
+              &opts->minlevel, 2, "Lowest level");
   sc_options_add_int (sc_opts, 'L', "maxlevel",
-              &opts->maxlevel, opts->maxlevel, "Highest level");
+              &opts->maxlevel, 5, "Highest level");
+  sc_options_add_double (sc_opts, 's', "scale",
+              &opts->vtk_scale, .95, "Parameter to shrink the simplices");
 
-  sc_options_add_int (sc_opts, 'h', "hanging-node-level",
-              &opts->hangine_node_level, opts->hangine_node_level,
-      "This determines what hanging nodes to include. h=0,1,2\n"
-      // " h=-1: Do not add element centre nodes either,\n"
-      " h=0: Include no hanging nodes,\n"
-      " h=1: Include hanging face nodes, but not edge nodes,\n"
-      " h=2: Include all hanging nodes. (default)");
-  // sc_options_add_string (sc_opts, 'v', "vtk", &opts->vtk, opts->vtk, "VTK basename");
-  sc_options_add_string (sc_opts, 'm', "msh",
-            &opts->mshpath, opts->mshpath, "MSH base filename");
   sc_options_add_string (sc_opts, 'c', "conn",
-            &opts->conn, opts->conn, "Name of the connectivity");
+            &opts->conn, "unit", "Name of the connectivity");
   sc_options_add_string (sc_opts, 'o', "outdir",
-            &opts->outdir, opts->outdir,
+            &opts->outdir, "out",
             "Directory in which to output output the vtk files");
 
   exitcode = 0;
@@ -294,7 +276,6 @@ main(int argc, char **argv) {
     }
 
     g->opts = opts;
-    // sc_init (g->mpicomm, 1, 1, NULL, SC_LP_DEFAULT);
     p4est_init (NULL, SC_LP_DEFAULT);
 
     if (create_context_from_opts(g, opts)) {

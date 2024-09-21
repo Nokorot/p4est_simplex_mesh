@@ -236,6 +236,7 @@ typedef struct
   int locsharer;         /**< Index of local sharer in sharers */
   uint8_t *chilev;
 
+  p4est_locidx_t *ghost_element_nodes;
   p4est_locidx_t *element_nodes;
   sc_array_t construct;  /**< Collect nodes during traversal */
   sc_array_t ownsort;    /**< Sorted owned nodes of local process */
@@ -397,15 +398,9 @@ node_register(
   int owner_rank;
   size_t size, zz;
 
-
-
   /* basic checks */
   P4EST_ASSERT (me != NULL);
-
-  // TODO: This is only be when le is not in a ghost
-  // P4EST_ASSERT(0 <= le && le < me->snodes->num_local_elements);
   P4EST_ASSERT(0 <= nodene && nodene < SNODES_VNODES);
-
 
   /* a new node is to be created or an existing one is passed in */
   if (lni == NULL) {
@@ -421,25 +416,12 @@ node_register(
   if (rank == -1) {
     rank = me->mpirank;
   }
-
   P4EST_ASSERT (0 <= rank && rank < me->mpisize);
 
   /* check remaining arguments */
   P4EST_ASSERT (0 <= le && le < (p4est_locidx_t)
                 (me->p4est->global_first_quadrant[rank + 1] -
                  me->p4est->global_first_quadrant[rank]));
-
-
-
-  /* if a node is already registered we don't need to do anything */
-  if (rank == me->mpirank && me->element_nodes[le * SNODES_VNODES + nodene] != -1) {
-    P4EST_ASSERT (*lni == -1 ||
-                  *lni == me->element_nodes[le * SNODES_VNODES + nodene]);
-
-    *lni = me->element_nodes[le * SNODES_VNODES + nodene];
-    return;
-  }
-
 
   if (*lni == -1) {
     /* create a new node with one instance */
@@ -518,6 +500,22 @@ node_lregister(
     p4est_locidx_t le, int nodene
     )
 {
+  P4EST_ASSERT (0 <= nodene && nodene < SNODES_VNODES);
+  P4EST_ASSERT (0 <= le && le < me->p4est->local_num_quadrants);
+
+  P4EST_ASSERT (lni == NULL
+                || *lni == -1
+                || me->element_nodes[le * SNODES_VNODES + nodene] == -1
+                || *lni == me->element_nodes[le * SNODES_VNODES + nodene]);
+
+  /* Check if this node is already registered we don't need to do anything */
+  if ( me->element_nodes[le * SNODES_VNODES + nodene] != -1 ) {
+    P4EST_ASSERT (lni != NULL );
+
+    *lni = me->element_nodes[le * SNODES_VNODES + nodene];
+    return;
+  }
+
   node_register(me, lni, -1, le, nodene);
 }
 
@@ -527,10 +525,10 @@ node_gregister(
     p4est_locidx_t ghostid, int nodene
     )
 {
+  p4est_locidx_t lnis;
   p4est_quadrant_t *gquad;
 
   P4EST_ASSERT (me != NULL);
-  // P4EST_ASSERT (me->sm != NULL);
   P4EST_ASSERT (0 <= nodene && nodene < SNODES_VNODES);
 
   if (me->ghost != NULL) {
@@ -538,10 +536,25 @@ node_gregister(
     P4EST_ASSERT (0 <= ghostid &&
                   ghostid < (p4est_locidx_t) me->ghost->ghosts.elem_count);
 
+    /* Check if this node is already registered we don't need to do anything */
+    if ( me->ghost_element_nodes[ghostid * SNODES_VNODES + nodene] != -1 ) {
+      P4EST_ASSERT (lni != NULL );
+
+      *lni = me->ghost_element_nodes[ghostid * SNODES_VNODES + nodene];
+      return;
+    }
+
+    if (lni == NULL) {
+      lnis = -1;
+      lni = &lnis;
+    }
+
     /* extract remote element number from ghost quadrant */
     gquad = (p4est_quadrant_t *) sc_array_index (&me->ghost->ghosts, ghostid);
     node_register (me, lni, me->ghost_rank[ghostid],
                    gquad->p.piggy3.local_num, nodene);
+
+    me->ghost_element_nodes[ghostid * SNODES_VNODES + nodene] = *lni;
   }
 }
 
@@ -611,8 +624,8 @@ iter_face(p4est_iter_face_info_t *fi, void *user_data)
   if (!sfd->is_ghost) {
     le = tree_quad_to_le(me->p4est, sf->treeid, sfd->quadid);
     lni = me->element_nodes[le*SNODES_VNODES + nodene];
-    // if (lni >= 0)
-    //   return;
+    if (lni >= 0)
+      return;
 
     node_lregister(me, &lni, le, n_face[sf->face]);
   } else {
@@ -1036,11 +1049,6 @@ owned_query_reply (snodes_meta_t *me)
       }
       if (!withloc) {
         cnode->runid = -1;
-        if (me->mpirank == 0) {
-          printf("%d, le: %u, face: %u\n", sic, contr->le, contr->nodene-1);
-        }
-
-        // P4EST_ASSERT( 0 ); // TODO: Don't expect this to exists
         continue;
       }
       P4EST_ASSERT (owner->rank < me->mpirank);
@@ -1194,20 +1202,13 @@ wait_query_reply (snodes_meta_t * me)
                            epos / ln->vnodes, epos % ln->vnodes, peer->rank);
 #endif
             P4EST_ASSERT (0 <= epos && epos < SNODES_VNODES * snodes->owned_count);
-// #ifndef P4_TO_P8
-//             P4EST_ASSERT (!alwaysowned[epos % ln->vnodes]);
-// #else
-//             /* extend this as further progress is made */
-//             P4EST_ASSERT (epos % SNODES_VNODES < 8);
-// #endif
-            // TODO FIX: This is incorect
-
 
             lni = snodes->element_nodes[epos];
             P4EST_ASSERT (0 <= lni && lni <
                           (p4est_locidx_t) me->construct.elem_count);
             cnode = (snodes_cnode_t *) sc_array_index (&me->construct, lni);
             oind = cnode->runid;
+
             P4EST_ASSERT (0 <= oind && oind < snodes->owned_count);
 
             /* send back the number of node owned by the local process */
@@ -1288,6 +1289,73 @@ wait_query_reply (snodes_meta_t * me)
 #endif /* P4EST_ENABLE_DEBUG */
 #endif /* P4EST_ENABLE_MPI */
 }
+
+static void
+set_element_node (snodes_meta_t * me, p4est_locidx_t le, int nodene)
+{
+  p4est_snodes_t     *ln = me->snodes;
+  p4est_locidx_t      lni, runid;
+  snodes_cnode_t     *cnode;
+
+  P4EST_ASSERT (0 <= le && le < ln->num_local_elements);
+  P4EST_ASSERT (0 <= nodene && nodene < SNODES_VNODES);
+  lni = ln->element_nodes[le * ln->vnodes + nodene];
+#if 0
+  P4EST_LDEBUGF ("lni for %ld, %d: %ld\n", (long) le, nodene, (long) lni);
+#endif
+  P4EST_ASSERT (0 <= lni && lni < (p4est_locidx_t) me->construct.elem_count);
+
+  cnode = (snodes_cnode_t *) sc_array_index (&me->construct, lni);
+  runid = cnode->runid;
+#if 0
+  P4EST_LDEBUGF ("Run id %ld, %d: %ld\n", nodene, (long) lni, (long) runid);
+#endif
+  P4EST_ASSERT (0 <= runid && runid < ln->num_local_nodes);
+  P4EST_ASSERT ((runid < me->num_owned && cnode->owner->rank == me->mpirank)
+                || (runid >= me->num_owned
+                    && cnode->owner->rank < me->mpirank));
+#ifdef P4EST_ENABLE_DEBUG
+  if (runid >= me->num_owned) {
+    lni = (p4est_locidx_t) (ln->nonlocal_nodes[runid - me->num_owned] -
+                            me->goffset[cnode->owner->rank]);
+    P4EST_ASSERT (0 <= lni &&
+                  lni < ln->global_owned_count[cnode->owner->rank]);
+  }
+#endif
+  ln->element_nodes[le * ln->vnodes + nodene] = runid;
+}
+
+static void
+assign_element_nodes (snodes_meta_t * me)
+{
+  int                 nodene;
+  p4est_locidx_t      le, lel;
+  p4est_locidx_t      lni, runid;
+  snodes_cnode_t     *cnode;
+  p4est_snodes_t     *ln = me->snodes;
+
+  lel = me->snodes->num_local_elements;
+  for (le = 0; le < lel; ++le) {
+    for (nodene = 0; nodene < SNODES_VNODES; ++nodene) {
+      if ((lni = me->element_nodes[le * SNODES_VNODES + nodene]) < 0)
+        continue;
+      P4EST_ASSERT (lni < (p4est_locidx_t) me->construct.elem_count);
+
+      cnode = (snodes_cnode_t *) sc_array_index (&me->construct, lni);
+      runid = cnode->runid;
+#ifdef P4EST_ENABLE_DEBUG
+      if (runid >= me->num_owned) {
+        lni = (p4est_locidx_t) (ln->nonlocal_nodes[runid - me->num_owned] -
+                                me->goffset[cnode->owner->rank]);
+        P4EST_ASSERT (0 <= lni &&
+                      lni < ln->global_owned_count[cnode->owner->rank]);
+      }
+#endif
+      ln->element_nodes[le * ln->vnodes + nodene] = runid;
+    }
+  }
+}
+
 
 static void
 populate_sharers (snodes_meta_t * me)
@@ -1430,12 +1498,6 @@ sort_allgather (snodes_meta_t * me)
   /* share owned count */
   snodes->owned_count = me->num_owned;
   snodes->num_local_nodes = me->num_owned + me->num_notowned_shared;
-
-  if (me->mpirank == 0) {
-    printf("%u, %u\n", snodes->num_local_nodes, me->construct.elem_count);
-  }
-  // Nodes not touched by local elements are missing
-  // P4EST_ASSERT(snodes->num_local_nodes == me->construct.elem_count);
 
   snodes->nonlocal_nodes = P4EST_ALLOC (p4est_gloidx_t, me->num_notowned_shared);;
   snodes->global_owned_count = P4EST_ALLOC (p4est_locidx_t, s);
@@ -1587,6 +1649,8 @@ p4est_snodes_new (
       }
     }
     P4EST_ASSERT (lg == (p4est_locidx_t) ghost->ghosts.elem_count);
+    me->ghost_element_nodes = P4EST_ALLOC(p4est_locidx_t, lg * SNODES_VNODES);
+    memset (me->ghost_element_nodes, -1, lg * SNODES_VNODES * sizeof(p4est_locidx_t));
 #ifdef P4EST_ENABLE_MPI
     me->proc_peer = P4EST_ALLOC_ZERO (int, me->mpisize);
     sc_array_init (&me->sortp, sizeof (snodes_peer_t *));
@@ -1633,12 +1697,16 @@ p4est_snodes_new (
   /* sort peers by process */
   sort_peers (me);
 
+
+
+
   /* receive query messages and send replies */
   wait_query_reply (me);
 
   // TODO: Check that the indices in sharers agree with those in element_nodes
 
   /* finalize element node assignment */
+  assign_element_nodes (me);
 // #ifndef P4_TO_P8
 //   assign_element_nodes (me);
 // #endif /* P4_TO_P8 */
@@ -1665,6 +1733,7 @@ p4est_snodes_new (
     sc_array_reset(&me->peerreq);
 #endif
     P4EST_FREE(me->ghost_rank);
+    P4EST_FREE(me->ghost_element_nodes);
   }
 
   clean_construct(me);
@@ -1747,9 +1816,6 @@ p4est_geometry_coordinates_snodes
 
       for (k = 0; k < SNODES_VNODES; ++k) {
         lni = enodes[k];
-        if (p4est->mpirank == 0 && !(lni < snodes->num_local_nodes)) {
-          printf("h; le: %d, nodene: %d, lni: %d\n", qz, k, lni);
-        }
         P4EST_ASSERT(lni < snodes->num_local_nodes);
 
         if (0 <= lni && !mask[lni]) {
@@ -1913,7 +1979,7 @@ p4est_new_simplex_mesh(
   int ce, c2, c3;
 #endif
 
-  p4est_topidx_t t, nt;
+  p4est_topidx_t t, nt, lft, llt;
   p4est_locidx_t le, ne, nte;
   p4est_locidx_t *le_nodes;
   p4est_tree_t *tree;
@@ -1963,16 +2029,15 @@ p4est_new_simplex_mesh(
   tnodes->local_element_offset = P4EST_ALLOC (p4est_locidx_t, ne + 1);
   tnodes->local_element_offset[0] = 0;
 
-  tnodes->local_first_tree = p4est->first_local_tree;
-  tnodes->local_last_tree = p4est->last_local_tree;
+  tnodes->local_first_tree = lft = p4est->first_local_tree;
+  tnodes->local_last_tree = llt = p4est->last_local_tree;
 
-  nt = p4est->last_local_tree - p4est->first_local_tree;
+  nt = llt - lft;
   tnodes->local_tree_offset = P4EST_ALLOC (p4est_locidx_t, nt + 1);
 
   // We iterate through the local quads to make the simplices
   le = 0;
-  for (t=p4est->first_local_tree;
-          t<=p4est->last_local_tree; ++t) {
+  for (t = lft; t <= llt; ++t) {
 
     tree = p4est_tree_array_index(p4est->trees, t);
     quadrants = &tree->quadrants;
@@ -2142,12 +2207,14 @@ p4est_new_simplex_mesh(
 
     } // for (zz = 0..|quadrants|)
 
-    tnodes->local_tree_offset[t + 1] =
+    tnodes->local_tree_offset[t - lft + 1] =
       (p4est_locidx_t) tnodes->simplices->elem_count;
 
   } // for (t = first-..last-localtrees)
 
   P4EST_ASSERT(le == ne);
+  P4EST_ASSERT(tnodes->local_tree_offset[llt - lft + 1]
+                  == tnodes->simplices->elem_count);
 
   P4EST_INFOF ("Created %ld local simplices\n",
                (long) tnodes->local_element_offset[ne]);
