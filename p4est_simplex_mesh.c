@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "p4est_base.h"
 #include "utils.c"
 
 #ifdef VIM_LS
@@ -16,9 +17,11 @@
 #endif
 
 
-#include <p4est_base.h>
 
 #ifndef P4_TO_P8
+#include <p4est_bits.h>
+#include "p4est_tnodes.h"
+
 #include "p4est_lnodes.h"
 #include "p4est_ghost.h"
 #include <p4est_iterate.h>
@@ -26,14 +29,18 @@
 #include "p4est_communication.h"
 #include "p4est_geometry.h"
 #else
+#include <p8est_bits.h>
+#include "p8est_tnodes.h"
+
 #include "p8est_lnodes.h"
 #include <p8est_iterate.h>
-#include "p8est_simplex_mesh.h"
 #include "p8est_simplex_mesh.h"
 #include "p8est_communication.h"
 #include "p8est_geometry.h"
 #endif
 
+
+int LEE;
 
 
 // #ifndef VIM_LS
@@ -127,6 +134,7 @@ typedef struct {
 }
 element_node_t;
 
+#define SNODES_SOURCES (P4EST_DIM + 1)
 #define SNODES_VNODES P4EST_DIM_POW(3)
 
 /***
@@ -389,9 +397,13 @@ node_register(
   int owner_rank;
   size_t size, zz;
 
+
+
   /* basic checks */
   P4EST_ASSERT (me != NULL);
-  P4EST_ASSERT(0 <= le && le < me->snodes->num_local_elements);
+
+  // TODO: This is only be when le is not in a ghost
+  // P4EST_ASSERT(0 <= le && le < me->snodes->num_local_elements);
   P4EST_ASSERT(0 <= nodene && nodene < SNODES_VNODES);
 
 
@@ -416,6 +428,8 @@ node_register(
   P4EST_ASSERT (0 <= le && le < (p4est_locidx_t)
                 (me->p4est->global_first_quadrant[rank + 1] -
                  me->p4est->global_first_quadrant[rank]));
+
+
 
   /* if a node is already registered we don't need to do anything */
   if (rank == me->mpirank && me->element_nodes[le * SNODES_VNODES + nodene] != -1) {
@@ -448,6 +462,8 @@ node_register(
 
   /* assign node to the local element position */
   if (rank == me->mpirank) {
+    P4EST_ASSERT(0 <= le && le < me->snodes->num_local_elements);
+
     P4EST_ASSERT (me->element_nodes[le * SNODES_VNODES + nodene] == -1);
     me->element_nodes[le * SNODES_VNODES + nodene] = *lni;
   }
@@ -603,9 +619,7 @@ iter_face(p4est_iter_face_info_t *fi, void *user_data)
     node_gregister(me, &lni, sfd->quadid, n_face[sf->face]);
   }
 
-
   face = sh->face;
-
   for (sz = 0; sz < P4EST_HALF; ++sz) {
     nodene = n_corner[p4est_face_corners[face][sz ^ (P4EST_HALF - 1)]];
     if (!shd->is_ghost[sz]) {
@@ -636,65 +650,38 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
 {
   snodes_meta_t *me = (snodes_meta_t *) user_data;
 
+  size_t sz, zz, efz;
+  int face, edge, nodene;
+  int faces_count;
+  int hanging;
+
   p4est_locidx_t le;
-  p4est_locidx_t lni;
+  p4est_locidx_t lni, *face_nodes;
 
-  int nodene;
-
-  p8est_iter_edge_side_t *side, *sh, *sf;
+  p8est_iter_edge_side_t *side;
   p8est_iter_edge_side_full_t *sfd;
   p8est_iter_edge_side_hanging_t *shd;
 
-  // p4est_topidx_t treeid;
-  // p4est_locidx_t quadid;
   p4est_quadrant_t *quad;
 
-  size_t sz, zz, efz;
-  int face, edge;
-  int faces_count;
+  hanging = 0;
 
-  // We determine the number of adjacent faces
-  faces_count = 0;
+  // Find a full and a hanging face
   for (zz = 0; zz < info->sides.elem_count; ++zz) {
     side = sc_array_index(&info->sides, zz);
+    hanging |= side->is_hanging;
+
     faces_count = SC_MAX(faces_count,
                     1 + SC_MAX(side->faces[0], side->faces[1]));
   }
 
-  p4est_locidx_t *face_nodes;
-  face_nodes = P4EST_ALLOC_ZERO(p4est_locidx_t, faces_count);
-  // memset(face_nodes, 0xff, sizeof(p4est_locidx_t) * faces_count);
-
-  // Find a full and a hanging face
-  sf = NULL;
-  sh = NULL;
-  for (zz = 0; zz < info->sides.elem_count; ++zz) {
-    side = sc_array_index(&info->sides, zz);
-    if (side->is_hanging) {
-      sh = side;
-    }
-    else {
-      sf = side;
-
-      if (!side->is.full.is_ghost) {
-        face_nodes[side->faces[0]] = 1;
-        face_nodes[side->faces[1]] = 1;
-      }
-    }
-  }
-
   // If no side is hanging we will not add an edge node
-  if (!sh) {
-    P4EST_FREE(face_nodes);
+  if (!hanging) {
     return;
   }
 
-  SC_CHECK_ABORT(sf, "Got edge with only hanging sides");
-
-  // Add the edge node
-  // quad = side_full->is.full.quad;
-  // p8est_quad_edge_center_coords(quad, side_full->edge, abc);
-  // ce = p4est_simplex_push_node(me, side_full->treeid, abc, owner);
+  face_nodes = P4EST_ALLOC(p4est_locidx_t, faces_count);
+  memset(face_nodes, -1, sizeof(p4est_locidx_t) * faces_count);
 
   lni = -1;
 
@@ -716,18 +703,16 @@ iter_edge(p8est_iter_edge_info_t *info, void *user_data)
 
       // For each face adjacent to a hanging edge, we also add a face node
       for (efz = 0; efz < 2; ++efz) {
-        if (!face_nodes[ side->faces[efz] ])
-          continue;
-
-        nodene = n_face[ p8est_edge_faces[edge][efz] ];
+        face = p8est_edge_faces[edge][efz];
+        nodene = n_face[ face ];
 
         if (!sfd->is_ghost) {
           le = tree_quad_to_le(me->p4est, side->treeid, sfd->quadid);
-          node_lregister(me, NULL, le, nodene);
-        } else {
-          node_gregister(me, NULL, sfd->quadid, nodene);
-        }
 
+          node_lregister(me, &face_nodes[ side->faces[efz] ], le, nodene);
+        } else {
+          node_gregister(me, &face_nodes[ side->faces[efz] ], sfd->quadid, nodene);
+        }
       }
     } else {
       shd = (p8est_iter_edge_side_hanging_t *) &side->is.hanging;
@@ -1050,8 +1035,12 @@ owned_query_reply (snodes_meta_t *me)
         }
       }
       if (!withloc) {
-        P4EST_ASSERT( 0 ); // Don't expect this to exists
         cnode->runid = -1;
+        if (me->mpirank == 0) {
+          printf("%d, le: %u, face: %u\n", sic, contr->le, contr->nodene-1);
+        }
+
+        // P4EST_ASSERT( 0 ); // TODO: Don't expect this to exists
         continue;
       }
       P4EST_ASSERT (owner->rank < me->mpirank);
@@ -1211,6 +1200,9 @@ wait_query_reply (snodes_meta_t * me)
 //             /* extend this as further progress is made */
 //             P4EST_ASSERT (epos % SNODES_VNODES < 8);
 // #endif
+            // TODO FIX: This is incorect
+
+
             lni = snodes->element_nodes[epos];
             P4EST_ASSERT (0 <= lni && lni <
                           (p4est_locidx_t) me->construct.elem_count);
@@ -1438,6 +1430,13 @@ sort_allgather (snodes_meta_t * me)
   /* share owned count */
   snodes->owned_count = me->num_owned;
   snodes->num_local_nodes = me->num_owned + me->num_notowned_shared;
+
+  if (me->mpirank == 0) {
+    printf("%u, %u\n", snodes->num_local_nodes, me->construct.elem_count);
+  }
+  // Nodes not touched by local elements are missing
+  // P4EST_ASSERT(snodes->num_local_nodes == me->construct.elem_count);
+
   snodes->nonlocal_nodes = P4EST_ALLOC (p4est_gloidx_t, me->num_notowned_shared);;
   snodes->global_owned_count = P4EST_ALLOC (p4est_locidx_t, s);
   lb[0] = snodes->owned_count;
@@ -1748,6 +1747,9 @@ p4est_geometry_coordinates_snodes
 
       for (k = 0; k < SNODES_VNODES; ++k) {
         lni = enodes[k];
+        if (p4est->mpirank == 0 && !(lni < snodes->num_local_nodes)) {
+          printf("h; le: %d, nodene: %d, lni: %d\n", qz, k, lni);
+        }
         P4EST_ASSERT(lni < snodes->num_local_nodes);
 
         if (0 <= lni && !mask[lni]) {
@@ -1778,50 +1780,194 @@ p4est_geometry_coordinates_snodes
 }
 
 
-p4est_simplex_mesh_t *
+
+static void
+p4est_tnodes_icoord_arrow (const int a[P4EST_DIM], const int b[P4EST_DIM],
+                           int r[P4EST_DIM])
+{
+  int                 j;
+
+  /* compute b - a */
+  for (j = 0; j < P4EST_DIM; ++j) {
+    r[j] = b[j] - a[j];
+  }
+}
+
+static void
+p4est_tnodes_icoord_cross (const int a[P4EST_DIM], const int b[P4EST_DIM],
+                           int *r)
+{
+  /* compute cross product */
+#ifndef P4_TO_P8
+  *r = a[0] * b[1] - a[1] * b[0];
+#else
+  r[0] = a[1] * b[2] - a[2] * b[1];
+  r[1] = a[2] * b[0] - a[0] * b[2];
+  r[2] = a[0] * b[1] - a[1] * b[0];
+#endif
+}
+
+#ifdef P4_TO_P8
+
+static int
+p4est_tnodes_icoord_inner (const int a[P4EST_DIM], const int b[P4EST_DIM])
+{
+  int                 j;
+  int                 r;
+
+  /* compute inner product */
+  r = 0;
+  for (j = 0; j < P4EST_DIM; ++j) {
+    r += a[j] * b[j];
+  }
+  return r;
+}
+
+#endif
+
+void
+snodes_push_simplex(
+    p4est_tnodes_t *tnodes,
+    const p4est_locidx_t *enodes,
+    const int eindex[SNODES_SOURCES]
+    )
+{
+  int i, j;
+  int icoord[SNODES_SOURCES][P4EST_DIM];
+  int taxes[P4EST_DIM][P4EST_DIM];
+  int product;
+
+#ifndef P4_TO_P8
+  int                *cross = &product;
+#else
+  int                 cross[P4EST_DIM];
+#endif
+
+  p4est_locidx_t *simplex, windex;
+
+
+#ifdef P4EST_ENABLE_DEBUG
+  /* verify range of node indices */
+  for (i = 0; i < SNODES_SOURCES; ++i) {
+    P4EST_ASSERT (0 <= eindex[i] && eindex[i] < P4EST_INSUL);
+    for (j = 0; j < i; ++j) {
+      P4EST_ASSERT (eindex[j] != eindex[i]);
+    }
+  }
+#endif
+
+  simplex = (p4est_locidx_t *) sc_array_push(tnodes->simplices);
+
+  /* local nodes are identified with coordinates */
+  for (i = 0; i < SNODES_SOURCES; ++i) {
+    P4EST_ASSERT(enodes[eindex[i]] >= 0);
+
+    simplex[i] = enodes[eindex[i]];
+
+    if (LEE == 32) {
+    }
+  }
+
+  return;
+
+  // TODO /* ensure right-handed orientation of simplex */
+  for (i = 0; i < SNODES_SOURCES; ++i) {
+    icoord[i][0] = elem_coords_n[ eindex[i] ][0];
+    icoord[i][1] = elem_coords_n[ eindex[i] ][1];
+#ifdef P4_TO_P8
+    icoord[i][2] = elem_coords_n[ eindex[i] ][2];
+#endif
+  }
+  for (j = 0; j < P4EST_DIM; ++j) {
+    p4est_tnodes_icoord_arrow (icoord[0], icoord[j + 1], taxes[j]);
+  }
+  p4est_tnodes_icoord_cross (taxes[0], taxes[1], cross);
+#ifdef P4_TO_P8
+  product = p4est_tnodes_icoord_inner (cross, taxes[2]);
+#endif
+  P4EST_ASSERT (product != 0);
+
+  if (product < 0) {
+    P4EST_LDEBUG("Flipped simplex");
+
+    windex = simplex[1];
+    simplex[1] = simplex[2];
+    simplex[2] = windex;
+  }
+}
+
+
+// p4est_simplex_mesh_t *
+p4est_tnodes_t *
 p4est_new_simplex_mesh(
     p4est_t *p4est,
     p4est_geometry_t *geom,
     p4est_ghost_t *ghost)
 {
   size_t zz, fi;
-  p4est_topidx_t t;
-  p4est_tree_t *tree;
-  p4est_locidx_t le;
-  p4est_locidx_t *le_nodes;
-  sc_array_t *quadrants;
-  p4est_quadrant_t qid, *quad;
-
-  p4est_locidx_t cf, cc, c0, c1;
-
+  int eindex[SNODES_VNODES];
+  int cf, c0, c1;
 #ifdef P4_TO_P8
   size_t ei;
   int edge;
-  // int face_has_hanging_edge;
-
-  p4est_locidx_t ce, c2, c3;
+  int ce, c2, c3;
 #endif
 
-  // element_node_t *elem_node;
-  p4est_locidx_t *simplex;
+  p4est_topidx_t t, nt;
+  p4est_locidx_t le, ne, nte;
+  p4est_locidx_t *le_nodes;
+  p4est_tree_t *tree;
+  sc_array_t *quadrants;
+  p4est_quadrant_t qid, *quad;
 
 
   p4est_snodes_t *snodes;
-  p4est_simplex_mesh_t *smesh;
+  p4est_tnodes_t *tnodes;
+  // p4est_simplex_mesh_t *smesh;
 
-  smesh = P4EST_ALLOC_ZERO(p4est_simplex_mesh_t, 1);
+  // smesh = P4EST_ALLOC_ZERO(p4est_simplex_mesh_t, 1);
 
-  snodes = smesh->snodes = p4est_snodes_new(p4est, ghost);
+  P4EST_ASSERT(p4est != NULL);
 
-  // Compute coordinates
-  smesh->coordinates = sc_array_new(3 * sizeof(double));
-  p4est_geometry_coordinates_snodes
-    (p4est, snodes, geom, smesh->coordinates);
+  tnodes = P4EST_ALLOC_ZERO(p4est_tnodes_t, 1);
+  snodes = p4est_snodes_new(p4est, ghost);
+  tnodes->lnodes = (p4est_lnodes_t *) snodes;
+  tnodes->lnodes_owned = 0;
+  tnodes->local_first_child = -1;
 
-  // Simplices
-  smesh->simplicies = sc_array_new((P4EST_DIM + 1)*sizeof(p4est_locidx_t));
+  tnodes->coord_to_lnode = NULL;
 
-  // return smesh;
+  tnodes->local_element_level = P4EST_ALLOC(int8_t, 1);
+
+
+  if ( 0 ) /* (!(construction_flags & P4EST_TNODES_COORDS_SEPARATE)) */ {
+    // ecoord = NULL;
+    // element_coords = NULL;
+    // p4est_geometry_coordinates_lnodes (p4est, lnodes, NULL, geom,
+    //                                    tnodes->coordinates, NULL);
+  }
+  else {
+    tnodes->coordinates = sc_array_new(3 * sizeof(double));
+    p4est_geometry_coordinates_snodes
+      (p4est, snodes, geom, tnodes->coordinates);
+  }
+
+  tnodes->simplices = sc_array_new((P4EST_DIM + 1)*sizeof(p4est_locidx_t));
+
+
+  // The last index is always the center
+  eindex[P4EST_DIM] = n_center;
+
+  ne = snodes->num_local_elements;
+
+  tnodes->local_element_offset = P4EST_ALLOC (p4est_locidx_t, ne + 1);
+  tnodes->local_element_offset[0] = 0;
+
+  tnodes->local_first_tree = p4est->first_local_tree;
+  tnodes->local_last_tree = p4est->last_local_tree;
+
+  nt = p4est->last_local_tree - p4est->first_local_tree;
+  tnodes->local_tree_offset = P4EST_ALLOC (p4est_locidx_t, nt + 1);
 
   // We iterate through the local quads to make the simplices
   le = 0;
@@ -1829,9 +1975,11 @@ p4est_new_simplex_mesh(
           t<=p4est->last_local_tree; ++t) {
 
     tree = p4est_tree_array_index(p4est->trees, t);
-
     quadrants = &tree->quadrants;
-    for (zz = 0; zz < quadrants->elem_count; ++zz, ++le) {
+    nte = quadrants->elem_count;
+
+    for (zz = 0; zz < nte; ++zz, ++le) {
+      LEE = le;
       quad = p4est_quadrant_array_index(quadrants, zz);
 
       qid = *quad;
@@ -1839,95 +1987,57 @@ p4est_new_simplex_mesh(
 
       le_nodes = &snodes->element_nodes[le*SNODES_VNODES];
 
-      // elem_node = sc_array_index(me->sa_element_nodes, elemid);
-      // cc = elem_node->volume_node;
-      cc = le_nodes[n_center];
-
       for (fi = 0; fi < P4EST_FACES; ++fi) {
-        // cf = elem_node->face_nodes[fi];
-        cf = le_nodes[n_face[fi]];
-
-        if (0 <= cf)
+        // Check of there is a face node
+        cf = n_face[fi];
+        if (0 <= le_nodes[ cf ])
         {
+          eindex[0] = n_face[fi];
+
 #ifndef P4_TO_P8
-          // c0 = elem_node->corner_nodes[ p4est_face_corners[fi][0] ];
-          // c1 = elem_node->corner_nodes[ p4est_face_corners[fi][1] ];
+          eindex[1] = n_corner[p4est_face_corners[fi][0]];
+          snodes_push_simplex(tnodes, le_nodes, eindex);
 
-          c0 = le_nodes[ n_corner[p4est_face_corners[fi][0]] ];
-          c1 = le_nodes[ n_corner[p4est_face_corners[fi][1]] ];
-
-          simplex = sc_array_push(smesh->simplicies);
-          simplex[0] = cc;
-          simplex[1] = c0;
-          simplex[2] = cf;
-
-          simplex = sc_array_push(smesh->simplicies);
-          simplex[0] = cc;
-          simplex[1] = cf;
-          simplex[2] = c1;
+          eindex[1] = n_corner[p4est_face_corners[fi][1]];
+          snodes_push_simplex(tnodes, le_nodes, eindex);
 #else
           for (ei = 0; ei < 4; ++ei) {
             edge = p8est_face_edges[fi][ei];
+            ce = n_edge[edge];
 
-            // c0 = elem_node->corner_nodes[ p8est_edge_corners[edge][0] ];
-            // c1 = elem_node->corner_nodes[ p8est_edge_corners[edge][1] ];
-            //
-            // ce = elem_node->edge_nodes[edge];
-
-            c0 = le_nodes[ n_corner[p8est_edge_corners[edge][0]] ];
-            c1 = le_nodes[ n_corner[p8est_edge_corners[edge][1]] ];
-
-            ce = le_nodes[ n_edge[edge] ];
-
-            if (ce < 0)
+            if (le_nodes[ ce ] < 0)
             {
-              simplex = sc_array_push(smesh->simplicies);
-              simplex[0] = cc;
-              simplex[1] = cf;
-              simplex[2] = c0;
-              simplex[3] = c1;
+              eindex[1] = n_corner[p8est_edge_corners[edge][0]];
+              eindex[2] = n_corner[p8est_edge_corners[edge][1]];
+              snodes_push_simplex(tnodes, le_nodes, eindex);
             }
             else
             {
-              // edge center
-              simplex = sc_array_push(smesh->simplicies);
-              simplex[0] = cc;
-              simplex[1] = cf;
-              simplex[2] = c0;
-              simplex[3] = ce;
+              eindex[1] = ce;
 
-              simplex = sc_array_push(smesh->simplicies);
-              simplex[0] = cc;
-              simplex[1] = cf;
-              simplex[2] = ce;
-              simplex[3] = c1;
+              eindex[2] = n_corner[p8est_edge_corners[edge][0]];
+              snodes_push_simplex(tnodes, le_nodes, eindex);
+
+              eindex[2] = n_corner[p8est_edge_corners[edge][1]];
+              snodes_push_simplex(tnodes, le_nodes, eindex);
             }
           }
 #endif
-
         }
         else
         {  // Split as usual
-          // c0 = elem_node->corner_nodes[ p4est_face_corners[fi][0] ];
-          // c1 = elem_node->corner_nodes[ p4est_face_corners[fi][1] ];
-
-          c0 = le_nodes[ n_corner[p4est_face_corners[fi][0]] ];
-          c1 = le_nodes[ n_corner[p4est_face_corners[fi][1]] ];
+          c0 = n_corner[p4est_face_corners[fi][0]];
+          c1 = n_corner[p4est_face_corners[fi][1]];
 
 #ifndef P4_TO_P8
-
-          simplex = sc_array_push(smesh->simplicies);
-          simplex[0] = cc;
-          simplex[1] = c0;
-          simplex[2] = c1;
+          eindex[0] = c0;
+          eindex[1] = c1;
+          snodes_push_simplex(tnodes, le_nodes, eindex);
 #else
-          // c2 = elem_node->corner_nodes[ p4est_face_corners[fi][2] ];
-          // c3 = elem_node->corner_nodes[ p4est_face_corners[fi][3] ];
+          c2 = n_corner[p4est_face_corners[fi][2]];
+          c3 = n_corner[p4est_face_corners[fi][3]];
 
-          c2 = le_nodes[ n_corner[p4est_face_corners[fi][2]] ];
-          c3 = le_nodes[ n_corner[p4est_face_corners[fi][3]] ];
-
-          int rot_corners = 0;
+          int offd_split = 0;
           if (quad->level == 0) {
             // The face split most be consistent on neighbouring faces.
             // This may be achieved by determining the diagonal, based on the global index
@@ -1966,7 +2076,7 @@ p4est_new_simplex_mesh(
             rot_corners = (first == c1 || first == c2);
 #endif
 
-            rot_corners = 0;
+            offd_split = 0;
 
           } else {
             // We split the face, so that the parent face is split by an X:
@@ -1985,56 +2095,64 @@ p4est_new_simplex_mesh(
               | (dim == 1 ? c & 1 | (c >> 1) & 2 : 0)
               | (dim == 2 ? c & 3                : 0);
 
-            rot_corners = (fchild == 1 || fchild == 2);
+            offd_split = (fchild == 1 || fchild == 2);
           }
 
-          // The face is (by default) split along the c0-c3 diagonal:
+          // Normally (not \ref offd_split) the face is split along the c0-c3 diagonal:
           //   c2--c3
           //   |  / |
           //   | /  |
           //   c0--c1
           //
-          // In order to split along the opposite diagonal, we rotate the
-          // variables once anti-clockwise
-          //
-          //   c3--c1
-          //   |  / |
-          //   | /  |
-          //   c2--c0
-          //
-          if (rot_corners) {
-            p4est_locidx_t tmp;
-            tmp = c1;
-            c1 = c0;
-            c0 = c2;
-            c2 = c3;
-            c3 = tmp;
+          // Otherwise the face is split along the c1-c2 diagonal:
+          //   c2--c3
+          //   | \  |
+          //   |  \ |
+          //   c0--c1
+
+          if (!offd_split) {
+            eindex[0] = c0;
+            eindex[2] = c3;
+
+            eindex[1] = c1;
+            snodes_push_simplex(tnodes, le_nodes, eindex);
+
+            eindex[1] = c2;
+            snodes_push_simplex(tnodes, le_nodes, eindex);
+          } else
+          {
+            eindex[0] = c1;
+            eindex[2] = c2;
+
+            eindex[1] = c0;
+            snodes_push_simplex(tnodes, le_nodes, eindex);
+
+            eindex[1] = c3;
+            snodes_push_simplex(tnodes, le_nodes, eindex);
           }
-
-          simplex = sc_array_push(smesh->simplicies);
-          simplex[0] = cc;
-          simplex[1] = c0;
-          simplex[2] = c1;
-          simplex[3] = c3;
-
-          simplex = sc_array_push(smesh->simplicies);
-          simplex[0] = cc;
-          simplex[1] = c3;
-          simplex[2] = c2;
-          simplex[3] = c0;
-
 #endif
         } // if fc == 0
 
       }  // for (fi = 0..P4EST_FACES)
+
+      /* update element simplex offset list */
+      tnodes->local_element_offset[le + 1] =
+        (p4est_locidx_t) tnodes->simplices->elem_count;
+
+
     } // for (zz = 0..|quadrants|)
+
+    tnodes->local_tree_offset[t + 1] =
+      (p4est_locidx_t) tnodes->simplices->elem_count;
+
   } // for (t = first-..last-localtrees)
 
+  P4EST_ASSERT(le == ne);
 
-  // sc_array_destroy(me.sa_element_nodes);
-  // sc_array_destroy(me.tree_offsets);
+  P4EST_INFOF ("Created %ld local simplices\n",
+               (long) tnodes->local_element_offset[ne]);
 
-  return smesh;
+  return tnodes;
 }
 
 

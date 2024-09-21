@@ -2,12 +2,13 @@
 #define P4EST_SIMPLEX_MESH_H_
 
 #ifndef P4_TO_P8
+#include <p4est_tnodes.h>
 #include <p4est_bits.h>
 #include <p4est_lnodes.h>
 #include <p4est_ghost.h>
 #include <p4est_geometry.h>
 #else
-#include <p8est_bits.h>
+#include <p8est_tnodes.h>
 #include <p8est_lnodes.h>
 #include <p8est_ghost.h>
 #include <p8est_geometry.h>
@@ -55,7 +56,8 @@ typedef struct {
 p4est_simplex_mesh_t;
 
 
-p4est_simplex_mesh_t *
+// p4est_simplex_mesh_t *
+p4est_tnodes_t *
 p4est_new_simplex_mesh(
     p4est_t *p4est,
     p4est_geometry_t *geometry,
@@ -63,11 +65,13 @@ p4est_new_simplex_mesh(
 
 
 
-
-
 void
 p4est_simplex_mesh_destroy(
     p4est_simplex_mesh_t *smesh);
+
+//void
+//p4est_simplex_mesh_destroy (
+//    p4est_simplex_mesh_t *smesh);
 
 void
 p4est_quad_corner_coords(

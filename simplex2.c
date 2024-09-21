@@ -1,23 +1,30 @@
-#include <string.h>
+
 #ifdef VIM_LS
 // #include <p4est_to_p8est.h>
 #endif
 
+#include <string.h>
 #include <sc_options.h>
 
 #ifndef P4_TO_P8
+#include "p4est_lnodes.h"
+#include "p4est_tnodes.h"
 #include <p4est_bits.h>
 #include <p4est_extended.h>
 #include <p4est_vtk.h>
 
 #include "p4est_simplex_mesh.h"
 #else
+#include "p8est_lnodes.h"
+#include "p8est_tnodes.h"
 #include <p8est_bits.h>
 #include <p8est_extended.h>
 #include <p8est_vtk.h>
 
 #include "p8est_simplex_mesh.h"
 #endif
+
+
 
 #include "utils.c"
 
@@ -26,6 +33,7 @@ typedef struct
   int minlevel, maxlevel;
   const char *conn;
   const char *mshpath;
+  const char *outdir;
 
   int hangine_node_level;
 }
@@ -40,7 +48,7 @@ typedef struct
 
   p4est_t *p4est;
   p4est_connectivity_t *conn;
-  p4est_ghost_t *ghost_layer;
+  p4est_ghost_t *ghost;
   p4est_geometry_t *geom;
 
   char *errmsg;
@@ -83,7 +91,6 @@ create_context_from_opts(context_t *g, options_t *opts)
 {
   p4est_t *p4est;
   p4est_connectivity_t *conn;
-  p4est_ghost_t *ghost_layer;
   p4est_geometry_t *geom = NULL;
 
   /* Create p4est */
@@ -110,8 +117,7 @@ create_context_from_opts(context_t *g, options_t *opts)
   p4est_balance (p4est, P4EST_CONNECT_FULL, NULL);
 
   /* Create ghost layer */
-  ghost_layer = p4est_ghost_new(p4est, P4EST_CONNECT_FULL);
-  g->ghost_layer = ghost_layer;
+  g->ghost = p4est_ghost_new(p4est, P4EST_CONNECT_FULL);
 
   /* Create geometry */
 #ifndef P4_TO_P8
@@ -141,18 +147,83 @@ create_context_from_opts(context_t *g, options_t *opts)
   return 0;
 }
 
-void
+static void
 destroy_context(context_t *g)
 {
   if (g->p4est)
     p4est_destroy(g->p4est);
   if (g->conn)
     p4est_connectivity_destroy(g->conn);
-  if (g->ghost_layer)
-    p4est_ghost_destroy(g->ghost_layer);
+  if (g->ghost)
+    p4est_ghost_destroy(g->ghost);
   if (g->geom)
     p4est_geometry_destroy(g->geom);
 }
+
+static void
+p4est_write_vtk(context_t *g)
+{
+  char filepath[1024];
+
+  sprintf(filepath, "out/p4est_box_d%d_%s_%d-%d",
+      P4EST_DIM, g->opts->conn, g->opts->minlevel, g->opts->maxlevel);
+
+  p4est_vtk_write_file(g->p4est, g->geom, filepath);
+}
+
+static void
+tnodes_run(context_t *g)
+{
+  p4est_tnodes_t *tnodes;
+  char filepath[1024];
+
+  int retval;
+  p4est_vtk_context_t *cont;
+
+  P4EST_ASSERT(g->p4est);
+  P4EST_ASSERT(g->ghost);
+
+  // return;
+
+  tnodes = p4est_new_simplex_mesh(
+        g->p4est,
+        g->geom,
+        g->ghost);
+
+  sprintf(filepath, "%s/" P4EST_STRING "_snodes_simplices_%dd_%s_%d-%d",
+      g->opts->outdir, P4EST_DIM, g->opts->conn,
+      g->opts->minlevel, g->opts->maxlevel);
+
+  /* write VTK output */
+  /* the geometry was passed to the tnodes already, don't use it here */
+  cont = p4est_vtk_context_new (g->p4est, filepath);
+  SC_CHECK_ABORT (cont != NULL, "Open VTK context");
+  // Supplyuing the geom here does not work for snodes atm
+  // p4est_vtk_context_set_geom (cont, g->geom);
+  p4est_vtk_context_set_continuous (cont, 1);
+
+  /* beware: values < 1. cause a lot more mesh nodes */
+  // p4est_vtk_context_set_scale (cont, 0.9);
+  p4est_vtk_context_set_scale (cont, 1.0);
+
+  cont = p4est_vtk_write_header_tnodes (cont, tnodes);
+  SC_CHECK_ABORT (cont != NULL, "Write tnodes VTK header");
+  // TODO: Add levels to snodes
+  cont = p4est_vtk_write_cell_dataf (cont, 1, 0, 1, 0,
+                                      0, 0, cont);
+
+  SC_CHECK_ABORT (cont != NULL, "Write tnodes VTK cells");
+  retval = p4est_vtk_write_footer (cont);
+  SC_CHECK_ABORT (!retval, "Close VTK context");
+
+
+
+  /* free triangle mesh */
+  p4est_lnodes_destroy (tnodes->lnodes);
+  p4est_tnodes_destroy (tnodes);
+}
+
+
 
 int
 main(int argc, char **argv) {
@@ -162,9 +233,7 @@ main(int argc, char **argv) {
   sc_options_t *sc_opts;
   options_t options, *opts = &options;
   context_t context = {0}, *g = &context;
-  p4est_simplex_mesh_t *smesh;
-  char filepath[1024];
-
+  // p4est_simplex_mesh_t *smesh;
 
   mpiret = sc_MPI_Init (&argc, &argv);
   SC_CHECK_MPI (mpiret);
@@ -182,27 +251,34 @@ main(int argc, char **argv) {
   opts->maxlevel = 5;
   opts->conn = "unit";
   opts->mshpath = NULL;  // Defaults to "{opts->conn}.msh"
+  opts->outdir = "out";
 
   sc_opts = sc_options_new (argv[0]);
-  sc_options_add_int (sc_opts, 'l', "minlevel", &opts->minlevel, opts->minlevel, "Lowest level");
-  sc_options_add_int (sc_opts, 'L', "maxlevel", &opts->maxlevel, opts->maxlevel, "Highest level");
+  sc_options_add_int (sc_opts, 'l', "minlevel",
+              &opts->minlevel, opts->minlevel, "Lowest level");
+  sc_options_add_int (sc_opts, 'L', "maxlevel",
+              &opts->maxlevel, opts->maxlevel, "Highest level");
 
-  sc_options_add_int (sc_opts, 'h', "hanging-node-level", &opts->hangine_node_level, opts->hangine_node_level,
+  sc_options_add_int (sc_opts, 'h', "hanging-node-level",
+              &opts->hangine_node_level, opts->hangine_node_level,
       "This determines what hanging nodes to include. h=0,1,2\n"
       // " h=-1: Do not add element centre nodes either,\n"
       " h=0: Include no hanging nodes,\n"
       " h=1: Include hanging face nodes, but not edge nodes,\n"
       " h=2: Include all hanging nodes. (default)");
   // sc_options_add_string (sc_opts, 'v', "vtk", &opts->vtk, opts->vtk, "VTK basename");
-  sc_options_add_string (sc_opts, 'm', "msh", &opts->mshpath, opts->mshpath, "MSH base filename");
-  sc_options_add_string (sc_opts, 'c', "conn", &opts->conn, opts->conn, "Name of the connectivity");
-
-
-  smesh = NULL;
+  sc_options_add_string (sc_opts, 'm', "msh",
+            &opts->mshpath, opts->mshpath, "MSH base filename");
+  sc_options_add_string (sc_opts, 'c', "conn",
+            &opts->conn, opts->conn, "Name of the connectivity");
+  sc_options_add_string (sc_opts, 'o', "outdir",
+            &opts->outdir, opts->outdir,
+            "Directory in which to output output the vtk files");
 
   exitcode = 0;
   do {
-    first_argc = sc_options_parse(p4est_package_id, SC_LP_DEFAULT, sc_opts, argc, argv);
+    first_argc = sc_options_parse(p4est_package_id,
+                    SC_LP_DEFAULT, sc_opts, argc, argv);
     if (first_argc < 0) {
       g->errmsg = "Failed to parse option format";
       sc_options_print_usage (p4est_package_id, SC_LP_ERROR, sc_opts, NULL);
@@ -226,41 +302,14 @@ main(int argc, char **argv) {
       break;
     }
 
-    smesh = p4est_new_simplex_mesh(
-        g->p4est,
-        g->geom,
-        g->ghost_layer);
+    tnodes_run(g);
 
-    if (!smesh)
-      break;
+    p4est_write_vtk(g);
 
-#ifndef P4_TO_P8
-    sprintf(filepath, "out/box_2d_%s_%d-%d", opts->conn, opts->minlevel, opts->maxlevel);
-#else
-    sprintf(filepath, "out/box_3d_%s_%d-%d", opts->conn, opts->minlevel, opts->maxlevel);
-#endif
-
-    p4est_vtk_write_file(g->p4est, g->geom, filepath);
-
-    if (opts->mshpath == NULL) {
-#ifndef P4_TO_P8
-      sprintf(filepath, "out/sx_2d_%s_%d-%d_%d.vtk", opts->conn, opts->minlevel, opts->maxlevel, g->mpirank);
-#else
-      sprintf(filepath, "out/sx_3d_%s_%d-%d_%d.vtk", opts->conn, opts->minlevel, opts->maxlevel, g->mpirank);
-#endif
-    } else {
-      strcpy(filepath, opts->mshpath);
-    }
-
-    p4est_simplex_mesh_write_vtk_file(filepath, smesh);
 
   } while (0);
   if (g->errmsg) {
     P4EST_GLOBAL_LERROR (g->errmsg);
-  }
-
-  if (smesh) {
-    p4est_simplex_mesh_destroy(smesh);
   }
 
   /*** clean up and exit ***/
