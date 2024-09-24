@@ -1,5 +1,6 @@
 
 #include <bits/types/locale_t.h>
+#include <linux/limits.h>
 #include <sc.h>
 #include <sc_containers.h>
 #include <sc_mpi.h>
@@ -1933,7 +1934,6 @@ p4est_new_simplex_mesh(
         {  // Split as usual
           c0 = n_corner[p4est_face_corners[fi][0]];
           c1 = n_corner[p4est_face_corners[fi][1]];
-
 #ifndef P4_TO_P8
           eindex[0] = c0;
           eindex[1] = c1;
@@ -1942,49 +1942,21 @@ p4est_new_simplex_mesh(
           c2 = n_corner[p4est_face_corners[fi][2]];
           c3 = n_corner[p4est_face_corners[fi][3]];
 
+          // When splitting the face we most ensure that the split
+          // is consistent on both sides of the faces.
           int offd_split = 0;
           if (quad->level == 0) {
-            // The face split most be consistent on neighbouring faces.
-            // This may be achieved by determining the diagonal, based on the global index
-            // of the vertices, since neighbouring faces has the same vertices.
-            // We do this by always splitting the diagonal with the vertex with the smallest
-            // global index.
-            //
-            // NOTE: We observe that for level = 0, all the vertices are independent in p4est_nodes_t
-            // so we may assume they have a global index
+            // At level zero we achieve this by splitting along the diagonal touching the vertex
+            // with the lowest global index, which is independent of face-orientation
 
-            // TODO: Determine this by global node number
-#if 0
-            p4est_locidx_t first = c0;
+            p4est_gloidx_t g0 = p4est_lnodes_global_index(tnodes->lnodes, le_nodes[c0]);
+            p4est_gloidx_t g1 = p4est_lnodes_global_index(tnodes->lnodes, le_nodes[c1]);
+            p4est_gloidx_t g2 = p4est_lnodes_global_index(tnodes->lnodes, le_nodes[c2]);
+            p4est_gloidx_t g3 = p4est_lnodes_global_index(tnodes->lnodes, le_nodes[c3]);
 
-            int rank = first < nodes->offset_owned_indeps
-                          ? nodes->nonlocal_ranks[first]
-                          : p4est->mpirank;
-
-
-            // THIS IS SO HACKY!
-            int rank1;
-#define cmp_node(NODE) \
-            rank1 = NODE < nodes->offset_owned_indeps  \
-                          ? nodes->nonlocal_ranks[NODE] \
-                          : p4est->mpirank; \
-            if (rank1 < rank || (rank1 == rank && NODE < first)) { \
-              first = NODE; \
-              rank = rank1; \
-            }
-
-            cmp_node(c1);
-            cmp_node(c2);
-            cmp_node(c3);
-#undef cmp_node
-
-            rot_corners = (first == c1 || first == c2);
-#endif
-
-            offd_split = 0;
-
+            offd_split = SC_MIN(g1, g2) < SC_MIN(g0, g3);
           } else {
-            // We split the face, so that the parent face is split by an X:
+            // At higher levels we split the face, so that the parent face is split by an X:
             //    +---+---+
             //    | \ | / |
             //    +---+---+
@@ -1992,7 +1964,6 @@ p4est_new_simplex_mesh(
             //    +---+---+
             // This way, the split is the same for all face-orientations (rotation, mirroring)
             // and thus the split will always be the same on any neighbouring face.
-            //
             int dim = (fi >> 1);
             int c = p4est_quadrant_child_id(quad);
             int fchild =
@@ -2053,110 +2024,11 @@ p4est_new_simplex_mesh(
   } // for (t = first-..last-localtrees)
 
   P4EST_ASSERT(le == ne);
-  P4EST_ASSERT(tnodes->local_tree_offset[llt - lft + 1]
-                  == tnodes->simplices->elem_count);
+  P4EST_ASSERT(nt < 0 || tnodes->local_tree_offset[llt - lft + 1]
+                              == tnodes->simplices->elem_count);
 
   P4EST_INFOF ("Created %ld local simplices\n",
                (long) tnodes->local_element_offset[ne]);
 
   return tnodes;
 }
-
-// Some utility functions for computing the coordinates of the nodes
-void
-p4est_quad_center_coords(
-    p4est_quadrant_t *quad,
-    double abc[3])
-{
-  double frac = 1.0 / (double) P4EST_ROOT_LEN;
-  double half_len = P4EST_QUADRANT_LEN(quad->level + 1);
-
-  abc[0] = (double) ( quad->x + half_len ) * frac;
-  abc[1] = (double) ( quad->y + half_len ) * frac;
-#ifdef P4_TO_P8
-  abc[2] = (double) ( quad->z + half_len ) * frac;
-#else
-  abc[2] = 0;
-#endif
-}
-
-void
-p4est_quad_corner_coords(
-    p4est_quadrant_t *quad,
-    int c,
-    double abc[3])
-{
-  double frac = 1.0 / (double) P4EST_ROOT_LEN;
-  double quad_len = P4EST_QUADRANT_LEN(quad->level);
-
-  abc[0] = frac * ( (double) quad->x
-                    + ( (c & 1) ? quad_len : 0 ) );
-
-  abc[1] = frac * ( (double) quad->y
-                    + ( (c & 2) ? quad_len : 0 ) );
-
-#ifdef P4_TO_P8
-  abc[2] = frac * ( (double) quad->z
-                    + ( (c & 4) ? quad_len : 0 ) );
-#else
-  abc[2] = 0;
-#endif
-}
-
-void
-p4est_quad_face_center_coords(
-    p4est_quadrant_t *quad,
-    int face,
-    double abc[3])
-{
-  double frac = 1.0 / (double) P4EST_ROOT_LEN;
-  double quad_len = P4EST_QUADRANT_LEN(quad->level);
-  double half_len = P4EST_QUADRANT_LEN(quad->level + 1);
-
-  abc[0] = frac * ( quad->x
-           + ( !(face ^ 1) ? quad_len : 0)  // For face 1
-           + (  (face >> 1) ? half_len : 0) // For all not x-orth faces
-           );                             // (ie. fi != 0, 1)
-
-  abc[1] = frac * ( quad->y
-           + ( !(face ^ 3) ? quad_len : 0) // For face 3
-           + ( !(face & 2) ? half_len : 0) // For all not y-orth faces
-           );                            // (ie. fi != 2, 3)
-
-#ifdef P4_TO_P8
-  abc[2] = frac * ( quad->z
-           + ( !(face ^ 5) ? quad_len : 0)  // For face 5
-           + ( !(face >> 2) ? half_len : 0) // For all not z-orth faces
-           );                             // (ie. fi != 4, 5)
-#else
-  abc[2] = 0;
-#endif
-}
-
-#ifdef P4_TO_P8
-void
-p8est_quad_edge_center_coords(
-    p4est_quadrant_t *quad,
-    int edge,
-    double abc[3])
-{
-  double frac = 1.0 / (double) P4EST_ROOT_LEN;
-  double len = P4EST_QUADRANT_LEN(quad->level);
-  double half_len = 0.5 * len;
-
-  int axis = (edge >> 2) + (edge >> 4);
-
-  abc[0] = frac * ( quad->x
-      + ( axis == 0 ? half_len : 0 )  // x-parallel
-      + ( (axis != 0 && edge & 1) ? len : 0 )
-      );
-  abc[1] = frac * ( quad->y
-      + ( axis == 1 ? half_len : 0 )  // y-parallel
-      + ( (axis == 0 && edge & 1) || (axis == 2 && edge & 2) ? len : 0 )
-      );
-  abc[2] = frac * ( quad->z
-      + ( axis == 2 ? half_len : 0 )  // z-parallel
-      + ( (axis != 2 && edge & 2) ? len : 0 )
-      );
-}
-#endif

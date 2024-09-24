@@ -34,8 +34,6 @@ typedef struct p4est_snodes {
     };
     p4est_lnodes_t lnodes;
   };
-
-
 }
 p4est_snodes_t;
 
