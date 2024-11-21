@@ -1795,16 +1795,16 @@ sort_allgather (BECK_nodes_meta_t * me)
   p4est_gloidx_t gntest = 0;
 
   // P4EST_ASSERT (me->num_global_triangles == 0);
-  // for (q = 0; q < s; ++q) {
-  //   gc = me->goffset[q + 1] =
-  //     gc + (snodes->global_owned_count[q] = localboth[2 * q + 0]);
-  //   // if (q == me->mpirank) {
-  //   //   tm->global_toffset = me->num_global_triangles;
-  //   // }
-  //   // me->num_global_triangles += (tm->local_tcount[q] = localboth[2 * q + 1]);
-  //   gntest += localboth[2 * q + 1];
-  // }
-  // snodes->global_offset = me->goffset[me->mpirank];
+  for (q = 0; q < s; ++q) {
+    gc = me->goffset[q + 1] =
+      gc + (snodes->global_owned_count[q] = localboth[2 * q + 0]);
+    // if (q == me->mpirank) {
+    //   tm->global_toffset = me->num_global_triangles;
+    // }
+    // me->num_global_triangles += (tm->local_tcount[q] = localboth[2 * q + 1]);
+    // gntest += localboth[2 * q + 1];
+  }
+  snodes->global_offset = me->goffset[me->mpirank];
   P4EST_FREE (localboth);
 
   P4EST_GLOBAL_INFOF("Total NUM Test %lu", gntest);

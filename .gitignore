@@ -1,19 +1,22 @@
-.gdb_history
-out2d 
-out3d
+# Bin files
+*.o
+*.log
 simplex2
 simplex3
-simplex2.o
-simplex3.o
 .deps/
 .dirstamp
-p4est_simplex_mesh.o
-p8est_simplex_mesh.o
+
+# Output files
 out
+
+# Clangd ls
 compile_flags.txt
-*.log
+
+# Gdb
+.gdb_history
 debug.gdb
+
+# Vim
 oneoff.utf-8.add
 oneoff.utf-8.add.spl
-out_old
 .session.vim
