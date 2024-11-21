@@ -16,7 +16,7 @@
 #include "utils.c"
 
 #ifdef VIM_LS
-// #include <p4est_to_p8est.h>
+#include <p4est_to_p8est.h>
 #define P4EST_SIMPLEX_DEBUG
 #define TIMINGS
 #endif
@@ -147,9 +147,9 @@ _n_face_edges_initialize()
 {
   if (n_face_edges_initialized)
     return;
-  for (int i=0; i < 6; ++i)
-    for (int j=0; j < 4; ++j) {
-      n_face_edges[i][j] = n_edge[ p8est_edge_face_edges[i][j] ];
+  for (int face=0; face < 6; ++face)
+    for (int edge=0; edge < 4; ++edge) {
+      n_face_edges[face][edge] = n_edge[ p8est_face_edges[face][edge] ];
     }
 }
 
@@ -168,30 +168,22 @@ static const int fconfig_tets[32] = {
 };
 
 // Compute the fconfig for the face of an element
+//
 static int
 config_face_config(p4est_BECK_element_config_t config, int8_t face)
 {
   _n_face_edges_initialize();
 
   p4est_BECK_face_config_t fconf;
-  fconf  = ((config >> n_face[face]) && 1) << 4;
-  fconf |= ((config >> n_face_edges[face][3]) && 1) << 3;
-  fconf |= ((config >> n_face_edges[face][2]) && 1) << 2;
-  fconf |= ((config >> n_face_edges[face][1]) && 1) << 1;
-  fconf |= ((config >> n_face_edges[face][0]) && 1) << 0;
+  fconf  = ((config >> n_face[face]) & 1) << 4;
 
+  fconf |= ((config >> n_face_edges[face][3]) & 1) << 3;
+  fconf |= ((config >> n_face_edges[face][2]) & 1) << 2;
+  fconf |= ((config >> n_face_edges[face][1]) & 1) << 1;
+  fconf |= ((config >> n_face_edges[face][0]) & 1) << 0;
   return fconf;
 }
 
-static int
-config_tets(p4est_BECK_element_config_t config)
-{
-  int face, sum;
-
-  for (sum = 0, face=0; face < P4EST_FACES; ++face)
-    sum += fconfig_tets[config_face_config(config, face)];
-  return sum;
-}
 
 #else
 /* face midpoints  */
@@ -209,8 +201,11 @@ static const int fconfig_tets[2] = { 1, 2 };
 static int
 config_face_config(p4est_BECK_element_config_t config, int8_t face)
 {
-  return (config >> n_face[face]) && 1;
+  return (config >> n_face[face]) & 1;
 }
+
+
+#endif
 
 // Compute the number of triangles in an element
 static int
@@ -222,9 +217,6 @@ config_tets(p4est_BECK_element_config_t config)
     sum += fconfig_tets[config_face_config(config, face)];
   return sum;
 }
-
-#endif
-
 
 // *elem_coords_n* define the element local coordinates of the nodes
 // in the range [0,2]^dim
@@ -293,7 +285,7 @@ typedef struct
   int locsharer;                       /**< Index of local sharer in sharers */
   uint8_t *chilev;                     /**< Level of the elements */
 
-  // p4est_BECK_element_config_t *configuration; /**< The element node configurations */
+  p4est_BECK_element_config_t *configuration; /**< The element node configurations */
   /** Offsets into local triangles per element and one beyond. */
   // p4est_locidx_t     *local_element_offset;
 
@@ -698,7 +690,7 @@ node_register(
 
     P4EST_ASSERT (me->element_nodes[le * SNODES_VNODES + nodene] == -1);
     me->element_nodes[le * SNODES_VNODES + nodene] = *lni;
-    // me->configuration[le * SNODES_VNODES] |= (1 << nodene);
+    me->configuration[le] |= (1 << nodene);
   }
 
   /* iterate through instances to find matching process */
@@ -1771,17 +1763,16 @@ sort_allgather (BECK_nodes_meta_t * me)
   snodes->global_owned_count = P4EST_ALLOC (p4est_locidx_t, s);
   lb[0] = snodes->owned_count;
 
-  // TODO:
   lb[1] = 0; // Number of owned local triangles
 
-//   /* establish local triangle count */
-  // lel = snodes->num_local_elements;
-  // lc /* = me->local_element_offset[0] */ = 0;
-  // for (le = 0; le < lel; ++le) {
-  //   lc /* = me->local_element_offset[le + 1] */ =
-  //           config_tets( me->configuration[le] );
-  // }
-  // lb[1] /* = me->num_triangles */ = lc;
+  /* establish local triangle count */
+  lel = snodes->num_local_elements;
+  lc /* = me->local_element_offset[0] */ = 0;
+  for (le = 0; le < lel; ++le) {
+    lc /* = me->local_element_offset[le + 1] */ +=
+            config_tets( me->configuration[le] );
+  }
+  lb[1] /* = me->num_triangles */ = lc;
 
   // /* parallel sharing of owned node and element counts */
   localboth = P4EST_ALLOC (p4est_locidx_t, 2 * me->mpisize);
@@ -1792,22 +1783,18 @@ sort_allgather (BECK_nodes_meta_t * me)
   me->goffset = P4EST_ALLOC (p4est_gloidx_t, s + 1);
   gc = me->goffset[0] = 0;
 
-  p4est_gloidx_t gntest = 0;
+  p4est_gloidx_t gntets = 0;
 
   // P4EST_ASSERT (me->num_global_triangles == 0);
   for (q = 0; q < s; ++q) {
     gc = me->goffset[q + 1] =
       gc + (snodes->global_owned_count[q] = localboth[2 * q + 0]);
-    // if (q == me->mpirank) {
-    //   tm->global_toffset = me->num_global_triangles;
-    // }
-    // me->num_global_triangles += (tm->local_tcount[q] = localboth[2 * q + 1]);
-    // gntest += localboth[2 * q + 1];
+    gntets += localboth[2 * q + 1];
   }
   snodes->global_offset = me->goffset[me->mpirank];
   P4EST_FREE (localboth);
 
-  P4EST_GLOBAL_INFOF("Total NUM Test %lu", gntest);
+  P4EST_GLOBAL_INFOF("Total NUM Tets %lu\n", gntets);
 }
 
 static void
@@ -1910,7 +1897,7 @@ p4est_BECK_nodes ( BECK_meta_t *meta )
   snodes->num_local_elements = lel;
   // me->snodes->num_local_elements = lel;
   //
-  // me->configuration = P4EST_ALLOC_ZERO(p4est_BECK_face_config_t, lel);
+  me->configuration = P4EST_ALLOC_ZERO(p4est_BECK_face_config_t, lel);
   // me->local_element_offset = P4EST_ALLOC (p4est_locidx_t, lel + 1);
   me->chilev = P4EST_ALLOC_ZERO(uint8_t, lel);
   snodes->element_nodes = me->element_nodes =
@@ -2023,7 +2010,7 @@ p4est_BECK_nodes ( BECK_meta_t *meta )
   sc_array_reset(&me->construct);
   sc_array_reset(&me->ownsort);
   P4EST_FREE(me->chilev);
-  // P4EST_FREE(me->configuration);
+  P4EST_FREE(me->configuration);
 
   return snodes;
 }
