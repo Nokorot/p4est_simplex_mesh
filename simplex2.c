@@ -1,5 +1,9 @@
+#include "sc.h"
+#include "sc_statistics.h"
+#include <stdint.h>
 #ifdef VIM_LS
 // #include <p4est_to_p8est.h>
+#define TIMINGS
 #endif
 
 #include <string.h>
@@ -23,6 +27,10 @@
 #include "p8est_simplex_mesh.h"
 #endif
 
+#ifdef TIMINGS
+#include "statistics.h"
+#endif
+
 #include "utils.c"
 
 typedef struct
@@ -31,6 +39,8 @@ typedef struct
   const char *conn;
   const char *mshpath;
   const char *outdir;
+
+  int output_vtk;
 
   double vtk_scale;
 }
@@ -49,6 +59,12 @@ typedef struct
   p4est_geometry_t *geom;
 
   char *errmsg;
+
+#ifdef TIMINGS
+  statistics_t *ss;
+#endif
+
+
 }
 context_t;
 
@@ -58,6 +74,12 @@ static int
 refine_fn (p4est_t * p4est, p4est_topidx_t which_tree, p4est_quadrant_t *quadrant)
 {
   context_t *g = (context_t *) p4est->user_pointer;
+
+
+  if (which_tree == 1)
+    return 1;
+  return 0;
+
 
   int refine_level = g->opts->maxlevel;
   if ((int) quadrant->level >= (refine_level - (int) (which_tree % 3))) {
@@ -181,34 +203,73 @@ tnodes_run(context_t *g)
   P4EST_ASSERT(g->p4est);
   P4EST_ASSERT(g->ghost);
 
-  tnodes = p4est_new_simplex_mesh(
+#ifdef TIMINGS
+  g->ss = SC_ALLOC(statistics_t, 1);
+  timing_init(g->ss);
+
+  timing_interval_begin(g->ss, TIMINGS_ALL);
+#endif
+
+  tnodes = p4est_new_BECK_mesh(
         g->p4est,
         g->geom,
-        g->ghost);
+        g->ghost
+#ifdef TIMINGS
+        , g->ss
+#endif
+        );
 
-  sprintf(filepath, "%s/" P4EST_STRING "_snodes_simplices_%s_%d-%d",
-      g->opts->outdir, g->opts->conn,
-      g->opts->minlevel, g->opts->maxlevel);
+#ifdef TIMINGS
+  timing_interval_end(g->ss, TIMINGS_ALL);
+  statistics_finelize(g->ss);
 
-  /* write VTK output */
-  /* the geometry was passed to the tnodes already, don't use it here */
-  cont = p4est_vtk_context_new (g->p4est, filepath);
-  SC_CHECK_ABORT (cont != NULL, "Open VTK context");
-  // p4est_vtk_context_set_geom (cont, g->geom);
-  p4est_vtk_context_set_continuous (cont, g->opts->vtk_scale >= 1.0);
+  sc_stats_compute(g->mpicomm, NUM_COUNTERS, g->ss->counters);
+  sc_stats_compute(g->mpicomm, TIMINGS_NUM_STATS, g->ss->timings);
 
-  /* beware: values < 1. cause a lot more mesh nodes */
-  p4est_vtk_context_set_scale (cont, g->opts->vtk_scale);
+  if (g->mpirank == 0) {
+    size_t stat;
+    for (stat = 0; stat < TIMINGS_NUM_STATS; ++stat) {
+      P4EST_INFOF("TimeTital[%s]: %f\n", TIMEING_STAT_NAMES[stat],
+          g->ss->timings[stat].sum_values);
+    }
 
-  cont = p4est_vtk_write_header_tnodes (cont, tnodes);
-  SC_CHECK_ABORT (cont != NULL, "Write tnodes VTK header");
-  // TODO: Add levels to snodes
-  cont = p4est_vtk_write_cell_dataf (cont, 1, 0, 1, 0,
-                                      0, 0, cont);
+    for (stat = 0; stat < NUM_COUNTERS; ++stat) {
+      P4EST_INFOF("Counter[%s]: %lu\n", COUNTER_NAMES[stat],
+          (uint64_t) (g->ss->counters[stat].sum_values));
+    }
 
-  SC_CHECK_ABORT (cont != NULL, "Write tnodes VTK cells");
-  retval = p4est_vtk_write_footer (cont);
-  SC_CHECK_ABORT (!retval, "Close VTK context");
+  }
+
+  timing_reset(g->ss);
+  SC_FREE(g->ss);
+#endif
+
+
+  if (g->opts->output_vtk) {
+    sprintf(filepath, "%s/" P4EST_STRING "_snodes_simplices_%s_%d-%d",
+        g->opts->outdir, g->opts->conn,
+        g->opts->minlevel, g->opts->maxlevel);
+
+    /* write VTK output */
+    /* the geometry was passed to the tnodes already, don't use it here */
+    cont = p4est_vtk_context_new (g->p4est, filepath);
+    SC_CHECK_ABORT (cont != NULL, "Open VTK context");
+    // p4est_vtk_context_set_geom (cont, g->geom);
+    p4est_vtk_context_set_continuous (cont, g->opts->vtk_scale >= 1.0);
+
+    /* beware: values < 1. cause a lot more mesh nodes */
+    p4est_vtk_context_set_scale (cont, g->opts->vtk_scale);
+
+    cont = p4est_vtk_write_header_tnodes (cont, tnodes);
+    SC_CHECK_ABORT (cont != NULL, "Write tnodes VTK header");
+    // TODO: Add levels to snodes
+    cont = p4est_vtk_write_cell_dataf (cont, 1, 0, 1, 0,
+                                        0, 0, cont);
+
+    SC_CHECK_ABORT (cont != NULL, "Write tnodes VTK cells");
+    retval = p4est_vtk_write_footer (cont);
+    SC_CHECK_ABORT (!retval, "Close VTK context");
+  }
 
   /* free triangle mesh */
   p4est_lnodes_destroy (tnodes->lnodes);
@@ -250,6 +311,11 @@ main(int argc, char **argv) {
             &opts->outdir, "out",
             "Directory in which to output output the vtk files");
 
+
+  sc_options_add_bool (sc_opts, 'v', "",
+            &opts->output_vtk, 0,
+            "If true, the resulting mesh is written to a vtk file");
+
   exitcode = 0;
   do {
     first_argc = sc_options_parse(p4est_package_id,
@@ -278,7 +344,8 @@ main(int argc, char **argv) {
 
     tnodes_run(g);
 
-    p4est_write_vtk(g);
+    if (opts->output_vtk)
+      p4est_write_vtk(g);
 
 
   } while (0);
