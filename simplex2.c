@@ -1,3 +1,4 @@
+#include "p4est_base.h"
 #include "sc.h"
 #include "sc_statistics.h"
 #include <stdint.h>
@@ -31,7 +32,8 @@
 #include "statistics.h"
 #endif
 
-#include "utils.c"
+#include "utils.h"
+
 
 typedef struct
 {
@@ -192,6 +194,57 @@ p4est_write_vtk(context_t *g)
 }
 
 static void
+MY_p4est_lnodes_destroy (p4est_lnodes_t * lnodes)
+{
+  size_t              zz, count;
+  p4est_lnodes_rank_t *lrank;
+
+  MY__FREE (lnodes->element_nodes);
+  MY__FREE (lnodes->nonlocal_nodes);
+  MY__FREE (lnodes->global_owned_count);
+  MY__FREE (lnodes->face_code);
+
+  count = lnodes->sharers->elem_count;
+  for (zz = 0; zz < count; zz++) {
+    lrank = p4est_lnodes_rank_array_index (lnodes->sharers, zz);
+    sc_array_reset (&(lrank->shared_nodes));
+  }
+  sc_array_destroy (lnodes->sharers);
+
+  MY__FREE (lnodes);
+}
+
+static void
+MY_p4est_tnodes_destroy (p4est_tnodes_t * tm)
+{
+  P4EST_ASSERT (tm != NULL);
+  P4EST_ASSERT (tm->lnodes != NULL);
+
+  if (tm->lnodes_owned) {
+    p4est_lnodes_destroy (tm->lnodes);
+  }
+  if (tm->coordinates != NULL) {
+    sc_array_destroy (tm->coordinates);
+  }
+  if (tm->coord_to_lnode != NULL) {
+    sc_array_destroy (tm->coord_to_lnode);
+  }
+  if (tm->simplices != NULL) {
+    sc_array_destroy (tm->simplices);
+  }
+  if (tm->simplex_level != NULL) {
+    sc_array_destroy (tm->simplex_level);
+  }
+  MY__FREE (tm->local_element_offset);
+  MY__FREE (tm->local_element_level);
+  MY__FREE (tm->local_tree_offset);
+  MY__FREE (tm->local_tcount);
+  MY__FREE (tm);
+}
+
+
+
+static void
 tnodes_run(context_t *g)
 {
   p4est_tnodes_t *tnodes;
@@ -221,26 +274,19 @@ tnodes_run(context_t *g)
 
 #ifdef TIMINGS
   timing_interval_end(g->ss, TIMINGS_ALL);
+
+  statistics_print_tots(g->ss);
+
   statistics_finelize(g->ss);
 
   sc_stats_compute(g->mpicomm, NUM_COUNTERS, g->ss->counters);
   sc_stats_compute(g->mpicomm, TIMINGS_NUM_STATS, g->ss->timings);
 
   if (g->mpirank == 0) {
-    size_t stat;
-    for (stat = 0; stat < TIMINGS_NUM_STATS; ++stat) {
-      P4EST_INFOF("TimeTital[%s]: %f\n", TIMEING_STAT_NAMES[stat],
-          g->ss->timings[stat].sum_values);
-    }
-
-    for (stat = 0; stat < NUM_COUNTERS; ++stat) {
-      P4EST_INFOF("Counter[%s]: %lu\n", COUNTER_NAMES[stat],
-          (uint64_t) (g->ss->counters[stat].sum_values));
-    }
-
+    statistics_print_tots(g->ss);
   }
 
-  timing_reset(g->ss);
+  // timing_reset(g->ss);
   SC_FREE(g->ss);
 #endif
 
@@ -272,8 +318,8 @@ tnodes_run(context_t *g)
   }
 
   /* free triangle mesh */
-  p4est_lnodes_destroy (tnodes->lnodes);
-  p4est_tnodes_destroy (tnodes);
+  MY_p4est_lnodes_destroy (tnodes->lnodes);
+  MY_p4est_tnodes_destroy (tnodes);
 }
 
 int
@@ -296,6 +342,10 @@ main(int argc, char **argv) {
 
   /* Does this really need to be before the parsing? */
   sc_init (g->mpicomm, 1, 1, NULL, SC_LP_DEFAULT);
+
+#ifdef MEM_COUNT
+  mem_counter_init(&simplex_mem_counter);
+#endif
 
   sc_opts = sc_options_new (argv[0]);
   sc_options_add_int (sc_opts, 'l', "minlevel",
@@ -355,6 +405,11 @@ main(int argc, char **argv) {
 
   /*** clean up and exit ***/
   destroy_context(g);
+
+#ifdef MEM_COUNT
+  mem_counter_print_unalloced(&simplex_mem_counter);
+  mem_counter_deinit(&simplex_mem_counter);
+#endif
 
   sc_options_destroy (sc_opts);
   sc_finalize ();

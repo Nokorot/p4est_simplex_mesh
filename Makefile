@@ -22,11 +22,12 @@ all: simplex2 simplex3
 clean:
 	rm -f *.o simplex2 simplex3
 
-simplex2: simplex2.o p4est_simplex_mesh.o statistics.o
+
+simplex2: simplex2.o p4est_simplex_mesh.o statistics.o utils.o
 	mkdir -p out
 	${CC} ${CFLAGS} -o $@ $^
 
-simplex3: simplex3.o p8est_simplex_mesh.o statistics.o
+simplex3: simplex3.o p8est_simplex_mesh.o statistics.o utils.o
 	mkdir -p out
 	${CC} ${CFLAGS} -o $@ $^
 
@@ -45,3 +46,7 @@ p8est_simplex_mesh.o: p8est_simplex_mesh.c p8est_simplex_mesh.h p4est_simplex_me
 
 statistics.o: statistics.c statistics.h
 	${CC} ${CFLAGS} -c -o $@ $<
+
+utils.o: utils.c utils.h
+	${CC} ${CFLAGS} -c -o $@ $<
+
