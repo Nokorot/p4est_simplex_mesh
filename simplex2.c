@@ -1,7 +1,9 @@
 #include "p4est_base.h"
 #include "sc.h"
 #include "sc_statistics.h"
+#include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #ifdef VIM_LS
 // #include <p4est_to_p8est.h>
 #define TIMINGS
@@ -34,6 +36,8 @@
 
 #include "utils.h"
 
+static const char *log_dirpath = "local_logs";
+
 
 typedef struct
 {
@@ -43,8 +47,10 @@ typedef struct
   const char *outdir;
 
   int output_vtk;
+  int log_to_file;
 
   double vtk_scale;
+
 }
 options_t;
 
@@ -221,7 +227,7 @@ MY_p4est_tnodes_destroy (p4est_tnodes_t * tm)
   P4EST_ASSERT (tm->lnodes != NULL);
 
   if (tm->lnodes_owned) {
-    p4est_lnodes_destroy (tm->lnodes);
+    MY_p4est_lnodes_destroy (tm->lnodes);
   }
   if (tm->coordinates != NULL) {
     sc_array_destroy (tm->coordinates);
@@ -259,10 +265,10 @@ tnodes_run(context_t *g)
 #ifdef TIMINGS
   g->ss = SC_ALLOC(statistics_t, 1);
   timing_init(g->ss);
-
-  timing_interval_begin(g->ss, TIMINGS_ALL);
 #endif
 
+
+  TSTAT_BEGIN(g->ss, TIMINGS_ALL);
   tnodes = p4est_new_BECK_mesh(
         g->p4est,
         g->geom,
@@ -271,25 +277,54 @@ tnodes_run(context_t *g)
         , g->ss
 #endif
         );
+  TSTAT_END(g->ss, TIMINGS_ALL);
+
 
 #ifdef TIMINGS
-  timing_interval_end(g->ss, TIMINGS_ALL);
-
-  statistics_print_tots(g->ss);
+  // statistics_print_tots(g->ss);
 
   statistics_finelize(g->ss);
 
   sc_stats_compute(g->mpicomm, NUM_COUNTERS, g->ss->counters);
   sc_stats_compute(g->mpicomm, TIMINGS_NUM_STATS, g->ss->timings);
 
+  // sc_stats_print(p4est_package_id, SC_LP_INFO, TIMINGS_NUM_STATS,
+  //                 g->ss->timings, 0, 0);
+
+
+  sc_statistics_t *stats = g->ss->stats;
+  // sc_statistics_print(stats, p4est_package_id, SC_LP_STATISTICS, 1, 0);
+
+  size_t zz;
+  sc_statinfo_t *stat;
+  for (zz = 0; zz < stats->sarray->elem_count; ++zz) {
+    stat = sc_array_index( stats->sarray, zz);
+    P4EST_GLOBAL_STATISTICSF(
+        "Total time for [%s]: %lf\n", stat->variable, stat->sum_values);
+  }
+
+  for (zz = 0; zz < TIMINGS_NUM_STATS; ++zz) {
+    P4EST_GLOBAL_STATISTICSF("Total time for [%s]: %f\n", TIMEING_STAT_NAMES[zz],
+        g->ss->timings[zz].sum_values);
+  }
+
+  for (zz = 0; zz < NUM_COUNTERS; ++zz) {
+    P4EST_GLOBAL_STATISTICSF("Total count for [%s]: %lu\n", COUNTER_NAMES[zz],
+        (uint64_t) (g->ss->counters[zz].sum_values));
+  }
+
+
   if (g->mpirank == 0) {
     statistics_print_tots(g->ss);
   }
 
+
+
+  sc_statistics_destroy(g->ss->stats);
+
   // timing_reset(g->ss);
   SC_FREE(g->ss);
 #endif
-
 
   if (g->opts->output_vtk) {
     sprintf(filepath, "%s/" P4EST_STRING "_snodes_simplices_%s_%d-%d",
@@ -318,7 +353,6 @@ tnodes_run(context_t *g)
   }
 
   /* free triangle mesh */
-  MY_p4est_lnodes_destroy (tnodes->lnodes);
   MY_p4est_tnodes_destroy (tnodes);
 }
 
@@ -360,11 +394,13 @@ main(int argc, char **argv) {
   sc_options_add_string (sc_opts, 'o', "outdir",
             &opts->outdir, "out",
             "Directory in which to output output the vtk files");
-
-
   sc_options_add_bool (sc_opts, 'v', "",
             &opts->output_vtk, 0,
             "If true, the resulting mesh is written to a vtk file");
+
+  sc_options_add_bool (sc_opts, 'l', "",
+            &opts->log_to_file, 0,
+            "Log to file");
 
   exitcode = 0;
   do {
@@ -385,7 +421,19 @@ main(int argc, char **argv) {
     }
 
     g->opts = opts;
-    p4est_init (NULL, SC_LP_DEFAULT);
+    // p4est_init (NULL, SC_LP_DEFAULT);
+
+    char log_filepath[1024];
+    sprintf(log_filepath, "%s/simplex_d%d_n%d_%s_l%d_L%d.log",
+        log_dirpath, P4EST_DIM, g->mpisize, opts->conn, opts->minlevel, opts->maxlevel);
+
+    FILE *log_file = fopen(log_filepath, "w");
+    if (log_file == NULL) {
+        fprintf(stderr, "Error opening log file\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    sc_set_log_defaults(log_file, NULL, SC_LP_DEFAULT);
 
     if (create_context_from_opts(g, opts)) {
       exitcode = 1;
@@ -396,6 +444,8 @@ main(int argc, char **argv) {
 
     if (opts->output_vtk)
       p4est_write_vtk(g);
+
+    fclose(log_file);
 
 
   } while (0);

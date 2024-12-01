@@ -1,0 +1,15 @@
+[14] p4est_snodes_new: nodes owned 27107840 shared 393857
+p8est with 13 trees on 16 processors
+Initial level 8 potential global quadrants 218103808 per tree 16777216
+Done p8est_new with 218103808 total quadrants
+Into p8est_refine with 218103808 total quadrants, allowed level 8
+Done p8est_refine with 218103808 total quadrants
+Into p8est_partition with 218103808 total quadrants
+Into p8est_partition_given with 218103808 total quadrants
+Done p8est_partition_given shipped 0 quadrants 0%
+Done p8est_partition shipped 0 quadrants 0%
+Into p8est_balance CORNER with 218103808 total quadrants
+Done p8est_balance with 218103808 total quadrants
+Into p8est_ghost_new CORNER
+Done p8est_ghost_new
+[0] p4est_snodes_new: nodes owned 27452161 shared 0

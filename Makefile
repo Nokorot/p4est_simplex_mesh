@@ -24,11 +24,11 @@ clean:
 
 
 simplex2: simplex2.o p4est_simplex_mesh.o statistics.o utils.o
-	mkdir -p out
+	mkdir -p out logs
 	${CC} ${CFLAGS} -o $@ $^
 
 simplex3: simplex3.o p8est_simplex_mesh.o statistics.o utils.o
-	mkdir -p out
+	mkdir -p out logs
 	${CC} ${CFLAGS} -o $@ $^
 
 

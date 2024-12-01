@@ -1,6 +1,7 @@
 #ifndef TIMINGS_H_
 #define TIMINGS_H_
 
+#include "sc_statistics.h"
 #ifndef TIMINGS
 
 #define TSTAT_BEGIN(ss, stat)
@@ -47,6 +48,9 @@ typedef struct timing_state
   sc_statinfo_t counters[NUM_COUNTERS];
   sc_statinfo_t timings[TIMINGS_NUM_STATS];
   sc_flopinfo_t fi, snap, snapshots[TIMINGS_NUM_STATS];
+
+  sc_statistics_t *stats;
+
 }
 statistics_t;
 

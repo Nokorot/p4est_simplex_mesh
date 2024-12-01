@@ -2,6 +2,7 @@
 
 #ifndef TIMINGS
 #define TIMINGS
+#include "p4est_base.h"
 #endif
 
 #include "sc.h"
@@ -33,7 +34,7 @@ timing_init(statistics_t *ss)
   COUNTER_NAMES[COUNTER_HANGING_EDGE] = "Hanging Edges";
   COUNTER_NAMES[COUNTER_SHARED_NODES] = "Shared Nodes";
 
-  // sc_flops_start(&ss->fi);
+  sc_flops_start(&ss->fi);
 }
 
 void
@@ -63,7 +64,7 @@ statistics_print_tots(statistics_t *ss)
 {
   size_t stat;
   for (stat = 0; stat < TIMINGS_NUM_STATS; ++stat) {
-    P4EST_INFOF("TimeTital[%s]: %f\n", TIMEING_STAT_NAMES[stat],
+    P4EST_GLOBAL_STATISTICSF("Tital time for  %s : %f\n", TIMEING_STAT_NAMES[stat],
         ss->timings[stat].sum_values);
   }
 
