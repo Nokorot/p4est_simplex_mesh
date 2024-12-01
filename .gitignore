@@ -8,6 +8,7 @@ simplex3
 
 # Output files
 out
+logs
 
 # Clangd ls
 compile_flags.txt
@@ -20,3 +21,4 @@ debug.gdb
 oneoff.utf-8.add
 oneoff.utf-8.add.spl
 .session.vim
+stats.csv
