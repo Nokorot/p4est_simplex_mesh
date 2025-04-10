@@ -16,7 +16,7 @@
 #include "utils.h"
 
 #ifdef VIM_LS
-#include <p4est_to_p8est.h>
+// #include <p4est_to_p8est.h>
 #define P4EST_SIMPLEX_DEBUG
 #define TIMINGS
 #endif
@@ -1770,15 +1770,8 @@ populate_sharers (BECK_nodes_meta_t * me)
 
         nonloc = lni - me->num_owned;
         gni = gof + ln->nonlocal_nodes[nonloc]; // cnode->runid;
-                                             //
-        if (! (me->goffset[tp->rank] <= gni &&
-                      gni < me->goffset[tp->rank + 1]))
-        {
-            printf("H\n");
-        }
-                                             //
-        P4EST_ASSERT (me->goffset[tp->rank] <= gni &&
-                      gni < me->goffset[tp->rank + 1]);
+
+        P4EST_ASSERT (me->goffset[tp->rank] <= gni && gni < me->goffset[tp->rank + 1]);
         ln->nonlocal_nodes[nonloc] = gni;
 
         /* this node has sharers: iterate through all of them */
